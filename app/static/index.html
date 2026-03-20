@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MindBridge — Mental Health Companion</title>
+    <meta name="description"
+        content="AI-powered mental health companion providing empathetic support, emotion analysis, and crisis resources." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet" />
+    <link rel="stylesheet" href="/static/style.css" />
+</head>
+
+<body>
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <div class="logo">
+                <span class="logo-icon">🧠</span>
+                <span class="logo-text">MindBridge</span>
+            </div>
+        </div>
+        <div class="sidebar-info">
+            <div class="info-card">
+                <h3>🛡️ Your Safe Space</h3>
+                <p>This is a judgment-free zone. I'm here to listen, understand, and support you.</p>
+            </div>
+            <div class="info-card">
+                <h3>📞 Crisis Help</h3>
+                <p><strong>988 Lifeline:</strong> Call or text 988</p>
+                <p><strong>Crisis Text:</strong> Text HOME to 741741</p>
+            </div>
+        </div>
+        <div class="sidebar-footer">
+            <p class="disclaimer">⚠️ Not a replacement for professional help.</p>
+        </div>
+    </aside>
+
+    <!-- Main Chat Area -->
+    <main class="chat-container">
+        <!-- Header Bar -->
+        <header class="chat-header">
+            <button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle sidebar">☰</button>
+            <div class="header-info">
+                <h1>MindBridge</h1>
+                <span class="status-badge" id="statusBadge">● Online</span>
+            </div>
+            <div class="emotion-indicator" id="emotionIndicator" style="display: none;">
+                <span class="emotion-label" id="emotionLabel"></span>
+            </div>
+        </header>
+
+        <!-- Messages Feed -->
+        <div class="messages-feed" id="messagesFeed">
+            <!-- Messages will be injected here by app.js -->
+        </div>
+
+        <!-- Input Area -->
+        <div class="input-area" id="inputArea">
+            <div class="input-controls">
+                <label class="tts-label">
+                    <input type="checkbox" id="ttsToggle" checked />
+                    <span>Enable Voice (Text-to-Speech)</span>
+                </label>
+            </div>
+            <div class="input-wrapper">
+                <button id="micBtn" class="mic-btn" disabled aria-label="Record voice" title="Hold or click to record">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" class="mic-icon-svg">
+                        <path
+                            d="M12 2C10.3431 2 9 3.34315 9 5V11C9 12.6569 10.3431 14 12 14C13.6569 14 15 12.6569 15 11V5C15 3.34315 13.6569 2 12 2Z"
+                            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                        <path d="M19 10V11C19 14.866 15.866 18 12 18C8.13401 18 5 14.866 5 11V10" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                        <path d="M12 18V22" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                            stroke-linejoin="round" />
+                        <path d="M8 22H16" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                            stroke-linejoin="round" />
+                    </svg>
+                </button>
+                <textarea id="userInput" placeholder="Share what's on your mind..." rows="1" disabled></textarea>
+                <button id="sendBtn" class="send-btn" disabled aria-label="Send message">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                        <path d="M22 2L11 13" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                            stroke-linejoin="round" />
+                        <path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                </button>
+            </div>
+            <p class="input-disclaimer">MindBridge is an AI companion, not a licensed therapist.</p>
+        </div>
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>

@@ -1,14 +1,21 @@
 """
-Safety & Consensus Service — Hybrid LLM Synthesizer
-─────────────────────────────────────────────────────
-Llama-3.1-8B reads the raw user text + RoBERTa statistical emotion,
-cross-validates them, and returns a structured clinical JSON.
+Safety & Consensus Service — Hybrid LLM Synthesizer v3
+────────────────────────────────────────────────────────
+Llama-3.1-8B reads raw user text + RoBERTa emotion + recent history
+and returns a single structured JSON that llm.py uses for EVERYTHING:
+  - Emotional classification (category, sentiment, intensity)
+  - Crisis detection (is_crisis, crisis_type)
+  - Response shaping (recommended_tone, message_class, token_budget)
 
-v2 changes:
-  • Added `intensity` field  (low / moderate / high / severe)
-  • Added `recommended_tone` field (validating / grounding / gentle_challenge / crisis_support)
-  • Added `crisis_type` field (null / suicidal_ideation / self_harm / acute_breakdown / other)
-  • Expanded fallback to include all new fields so llm.py never gets KeyError
+v3 changes (critical safety fixes):
+  • message_class and token_budget now come from the 8B LLM — NOT from
+    brittle Python string matching in llm.py. This eliminates the case
+    where "I don't know how I can go on" is classified as advice_request,
+    and "goodbye" is classified as gratitude.
+  • Crisis ALWAYS overrides message_class and token_budget regardless of
+    what the LLM returns — enforced in Python after the API call.
+  • token_budget validated against crisis minimum (400 tokens) before return.
+  • All 7 fields validated and coerced to known-good values.
 """
 from __future__ import annotations
 import json
@@ -20,6 +27,24 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 
+# ── Token budgets by message class ────────────────────────────────────────────
+# These are the ONLY valid values. The 8B sets the class, Python sets the budget.
+# Crisis always overrides — see _apply_crisis_override() below.
+
+MESSAGE_CLASS_BUDGETS: dict[str, int] = {
+    "gratitude":         80,    # "thanks", "you helped", "feel better now"
+    "short_casual":      100,   # ≤5 words, no emotional content
+    "first_disclosure":  150,   # first time sharing an emotional problem
+    "positive_update":   130,   # "i tried it", "i made a friend", "it worked"
+    "advice_request":    220,   # explicitly asking for help or guidance
+    "emotional_ongoing": 200,   # mid-conversation emotional exchange
+    "crisis":            500,   # is_crisis=True — always gets full budget
+}
+
+# Minimum token budget for any crisis response — hard floor, never negotiable
+CRISIS_TOKEN_FLOOR = 400
+
+
 def _get_client() -> AsyncGroq:
     return AsyncGroq(api_key=settings.GROQ_API_KEY)
 
@@ -29,135 +54,282 @@ async def synthesize_consensus(
     roberta_emotion: str,
     roberta_score: float,
     recent_history: str = "",
+    turn_count: int = 0,
 ) -> dict:
     """
-    Executes the LLM Sentiment & Crisis Synthesizer (Llama-3.1-8B on Groq).
+    Single source of truth for all message classification and emotional analysis.
+    Returns a dict with ALL fields that llm.py needs — no Python string matching
+    in llm.py, no secondary classification step anywhere.
 
-    Returns a structured dict with ALL fields llm.py expects:
-      - llm_sentiment   : verified emotional state in plain language
-      - category        : dynamic psychological category (free-form, no predefined list)
-      - intensity       : low | moderate | high | severe
-      - is_crisis       : True only if active suicidal ideation / threat to life
-      - crisis_type     : null | suicidal_ideation | self_harm | acute_breakdown | other
-      - reasoning       : 1-sentence explanation
-      - recommended_tone: validating | grounding | gentle_challenge | crisis_support
+    Returns:
+        llm_sentiment    : verified emotional state in plain language
+        category         : specific psychological category (free-form)
+        intensity        : low | moderate | high | severe
+        is_crisis        : bool — true only for explicit suicidal ideation / threat to life
+        crisis_type      : null | suicidal_ideation | self_harm | acute_breakdown | other
+        reasoning        : 1-sentence explanation
+        recommended_tone : validating | grounding | gentle_challenge | crisis_support
+        message_class    : gratitude | short_casual | first_disclosure | positive_update
+                           | advice_request | emotional_ongoing | crisis
+        token_budget     : int — resolved from message_class, crisis-overridden in Python
     """
-    logger.info(f"Synthesizer — analyzing: '{text[:60]}...'")
+    logger.info(f"Synthesizer v3 — analyzing: '{text[:60]}...'")
     client = _get_client()
 
-    system_prompt = """You are an expert clinical sentiment analyzer and crisis triage AI.
-You read the user's message and the raw statistical emotion from an NLP model,
-then synthesize them into a structured psychological assessment.
+    system_prompt = f"""You are an expert clinical sentiment analyzer and conversation turn classifier.
 
-Respond ONLY in strictly valid JSON. No preamble. No explanation outside the JSON.
-Use exactly these keys:
+You receive:
+1. A user's message to a mental health support chatbot
+2. A statistical emotion from RoBERTa NLP model
+3. Recent conversation history (if any)
+4. The current turn number
 
-{
-  "llm_sentiment": "string — the verified emotional state in plain human language (e.g. 'exhaustion', 'anticipatory grief', 'emotional masking')",
-  "category": "string — discover the psychological category FREELY from the text. Do not use a predefined list. Examples: 'severe_burnout', 'post_breakup_identity_loss', 'caregiver_fatigue', 'chronic_loneliness', 'high_functioning_anxiety'",
+Your job: return a single JSON object that classifies BOTH the emotional state
+AND the conversation turn type, so the response system knows exactly how to reply.
+
+────────────────────────────────────────────────────────────────
+RESPOND ONLY IN VALID JSON. No preamble. No explanation outside JSON.
+────────────────────────────────────────────────────────────────
+
+Required keys:
+
+{{
+  "llm_sentiment": "string — verified emotional state in plain language. Examples: 'exhaustion', 'anticipatory grief', 'emotional masking', 'post-breakup identity loss', 'quiet hopelessness'",
+
+  "category": "string — discover the psychological category FREELY from the text. Be specific, not generic. 'depression' is too generic. 'chronic loneliness with social withdrawal' is correct. Examples: 'severe_burnout', 'caregiver_fatigue', 'high_functioning_anxiety', 'post_divorce_grief', 'workplace_isolation'",
+
   "intensity": "string — exactly one of: low | moderate | high | severe",
-  "is_crisis": "boolean — true ONLY if the user explicitly mentions suicidal thoughts, wanting to die, self-harm, or an active threat to their life. False for everything else.",
-  "crisis_type": "string or null — if is_crisis is true, classify as: suicidal_ideation | self_harm | acute_breakdown | other. If is_crisis is false, use null.",
-  "reasoning": "string — one sentence explaining why is_crisis is true or false, and what the dominant psychological theme is",
-  "recommended_tone": "string — exactly one of: validating | grounding | gentle_challenge | crisis_support"
-}
 
+  "is_crisis": "boolean — true ONLY when the message contains explicit suicidal ideation, a plan to end their life, or active self-harm. See rules below.",
+
+  "crisis_type": "string or null — if is_crisis true: suicidal_ideation | self_harm | acute_breakdown | other. If false: null",
+
+  "reasoning": "string — one sentence: why is_crisis is true or false, and what the core emotional situation is",
+
+  "recommended_tone": "string — exactly one of: validating | grounding | gentle_challenge | crisis_support",
+
+  "message_class": "string — classify THIS message using EXACTLY these rules (see below)",
+
+  "token_budget": "integer — the budget for this message class (see table below)"
+}}
+
+────────────────────────────────────────────────────────────────
+MESSAGE CLASS RULES — read every rule before classifying:
+────────────────────────────────────────────────────────────────
+
+"gratitude"
+  → User is clearly wrapping up, expressing thanks, or reporting they feel better.
+  → Examples: "thanks so much", "that really helped", "i feel much better now", "i'm good now"
+  → ⚠️ WARNING: Do NOT classify as gratitude if message contains farewell with distress.
+     "goodbye, nobody will miss me" = emotional_ongoing or crisis, NOT gratitude.
+     "bye, feeling better now" = gratitude. The difference is presence of distress.
+  → token_budget: 80
+
+"short_casual"
+  → Very short message (1–5 words) with no emotional content detected.
+  → Examples: "ok", "hey", "what do you mean", "i see"
+  → Do NOT use this if the short message contains emotional signal.
+     "i'm done" is NOT short_casual — it is emotional_ongoing or crisis.
+  → token_budget: 100
+
+"first_disclosure"
+  → Turn 0–2 AND user is sharing an emotional problem for the first time.
+  → Current turn is: {turn_count}
+  → Examples: "i feel lonely and no one likes me", "i've been struggling a lot lately"
+  → token_budget: 150
+
+"positive_update"
+  → User is sharing that something they tried worked, or that they feel better
+    as a RESULT of a specific action they took.
+  → Examples: "i talked to someone today", "i tried what you said and it worked",
+    "i made a friend at work", "went outside and felt a bit better"
+  → token_budget: 130
+
+"advice_request"
+  → User is explicitly and clearly asking for guidance or a how-to.
+  → ⚠️ CRITICAL: Only classify as advice_request if the request is UNAMBIGUOUS.
+     "how can I make friends" = advice_request ✓
+     "I don't know how I can go on like this" = emotional_ongoing ✗ (NOT advice_request)
+     "what should I do about my job" = advice_request ✓
+     "I don't know what to do anymore" = emotional_ongoing ✗ (NOT advice_request)
+  → The test: is the user asking for a practical solution to a defined problem?
+    If yes → advice_request. If they are expressing despair/confusion → emotional_ongoing.
+  → token_budget: 220
+
+"emotional_ongoing"
+  → Default class for any message that is emotional in nature and doesn't fit above.
+  → When in doubt, use this. It is always safer than advice_request or gratitude.
+  → token_budget: 200
+
+"crisis"
+  → is_crisis is true.
+  → Always set message_class to "crisis" when is_crisis is true.
+  → token_budget: 500
+
+────────────────────────────────────────────────────────────────
+IS_CRISIS RULES — read carefully:
+────────────────────────────────────────────────────────────────
+
+is_crisis = TRUE only when:
+  • Explicit suicidal ideation: "I want to kill myself", "I want to die", "I am going to end my life"
+  • A plan is mentioned: "I have pills", "I bought a rope", "I know how I'll do it"
+  • Active self-harm: "I am cutting myself right now", "I hurt myself tonight"
+  • Direct farewell with stated intent: "this is my goodbye, I won't be here tomorrow"
+
+is_crisis = FALSE for:
+  • Passive ideation WITHOUT plan or intent: "I wish I could disappear", "I feel like giving up"
+    → These are high intensity emotional_ongoing, NOT crisis
+  • "I can't go on like this" → high intensity emotional_ongoing
+  • "I want to give up" → high intensity emotional_ongoing
+  • "goodbye" alone (farewell after a normal conversation) → check context, likely gratitude
+  • Frustration: "I want to kill my boss" → NOT crisis (colloquial)
+
+────────────────────────────────────────────────────────────────
 TONE GUIDE:
-- validating      : user needs to feel heard, not advised (most emotional disclosures)
-- grounding       : user is spiraling, needs calm anchoring in the present moment
-- gentle_challenge: user is stuck in a negative belief loop, ready for a gentle reframe
-- crisis_support  : is_crisis is true — stay present, do not give advice
-
-INTENSITY GUIDE:
-- low    : mild emotional discomfort, curious or reflective mood
-- moderate: noticeable distress but functioning
-- high   : significant distress, struggling to cope
-- severe : overwhelming distress, possible crisis indicators
-
-CRITICAL RULES:
-1. is_crisis MUST be false unless suicidal ideation or active self-harm is explicit.
-2. "I want to disappear" or "I can't do this anymore" = high intensity, is_crisis = false (passive ideation only becomes is_crisis = true if there is explicit intent or plan)
-3. "I want to kill myself" or "I have a plan to end my life" = is_crisis = true
-4. The category must be specific to THIS message — not generic. "depression" is too generic. "post-divorce identity collapse" is correct."""
+────────────────────────────────────────────────────────────────
+  validating       → user needs to feel heard (most emotional disclosures)
+  grounding        → user is spiraling, needs anchoring in present moment
+  gentle_challenge → user stuck in negative belief loop, ready for gentle reframe
+  crisis_support   → is_crisis is true — always use this when is_crisis is true
+"""
 
     user_prompt = (
         f'User message: "{text}"\n'
         f"RoBERTa statistical emotion: {roberta_emotion} (confidence: {roberta_score:.2f})\n"
+        f"Current turn: {turn_count}\n"
     )
     if recent_history:
-        user_prompt += f"Recent conversation context:\n{recent_history}"
+        user_prompt += f"\nRecent conversation:\n{recent_history}"
 
     try:
         response = await client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=settings.SYNTHESIZER_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_prompt},
             ],
             response_format={"type": "json_object"},
-            temperature=0.1,      # low — we want consistent structured output
-            max_tokens=300,
+            temperature=0.1,
+            max_tokens=350,
         )
 
         content = response.choices[0].message.content
         result  = json.loads(content)
 
-        # Validate and normalize all fields — never trust LLM output blindly
-        intensity      = result.get("intensity", "moderate")
-        rec_tone       = result.get("recommended_tone", "validating")
-        crisis_type    = result.get("crisis_type", None)
-        is_crisis      = bool(result.get("is_crisis", False))
+        # ── Validate and coerce all fields ────────────────────────────────────
+        is_crisis   = bool(result.get("is_crisis", False))
+        intensity   = result.get("intensity", "moderate")
+        rec_tone    = result.get("recommended_tone", "validating")
+        crisis_type = result.get("crisis_type", None)
+        msg_class   = result.get("message_class", "emotional_ongoing")
+        token_budget = result.get("token_budget", 200)
 
-        # Coerce to valid enum values if LLM drifted
+        # Coerce enums to valid values
         if intensity not in ("low", "moderate", "high", "severe"):
             intensity = "moderate"
         if rec_tone not in ("validating", "grounding", "gentle_challenge", "crisis_support"):
             rec_tone = "validating"
-        if is_crisis and rec_tone != "crisis_support":
-            rec_tone = "crisis_support"   # always override tone on crisis
-        if is_crisis and crisis_type not in ("suicidal_ideation", "self_harm", "acute_breakdown", "other"):
-            crisis_type = "other"
-        if not is_crisis:
-            crisis_type = None
+        if msg_class not in MESSAGE_CLASS_BUDGETS:
+            msg_class = "emotional_ongoing"
 
-        if is_crisis:
+        # Resolve token_budget from our authoritative table — never trust LLM integer
+        token_budget = MESSAGE_CLASS_BUDGETS.get(msg_class, 200)
+
+        # ── Crisis always wins — Python enforces this, never the LLM ─────────
+        result = _apply_crisis_override(
+            result=result,
+            is_crisis=is_crisis,
+            crisis_type=crisis_type,
+            intensity=intensity,
+            rec_tone=rec_tone,
+            msg_class=msg_class,
+            token_budget=token_budget,
+        )
+
+        if result["is_crisis"]:
             logger.warning(
                 f"[SAFETY ALERT] Crisis detected! "
-                f"Type: {crisis_type} | Reasoning: {result.get('reasoning', '')}"
+                f"Type: {result['crisis_type']} | "
+                f"Class: {result['message_class']} | "
+                f"Tokens: {result['token_budget']} | "
+                f"Reason: {result['reasoning']}"
             )
         else:
             logger.info(
-                f"Consensus OK — category: {result.get('category')} | "
-                f"intensity: {intensity} | tone: {rec_tone}"
+                f"Consensus OK — class: {result['message_class']} | "
+                f"category: {result['category']} | "
+                f"intensity: {result['intensity']} | "
+                f"tone: {result['recommended_tone']} | "
+                f"tokens: {result['token_budget']}"
             )
 
-        return {
-            "llm_sentiment":    result.get("llm_sentiment", "unknown"),
-            "category":         result.get("category", "general"),
-            "intensity":        intensity,
-            "is_crisis":        is_crisis,
-            "crisis_type":      crisis_type,
-            "reasoning":        result.get("reasoning", ""),
-            "recommended_tone": rec_tone,
-        }
+        return result
 
     except json.JSONDecodeError as e:
         logger.error(f"Synthesizer — JSON parse failed: {e}")
-        return _fallback_consensus(roberta_emotion)
+        return _fallback_consensus(roberta_emotion, turn_count)
 
     except Exception as e:
         logger.error(f"Synthesizer — API error: {e}")
-        return _fallback_consensus(roberta_emotion)
+        return _fallback_consensus(roberta_emotion, turn_count)
 
 
-def _fallback_consensus(roberta_emotion: str = "neutral") -> dict:
+def _apply_crisis_override(
+    result: dict,
+    is_crisis: bool,
+    crisis_type,
+    intensity: str,
+    rec_tone: str,
+    msg_class: str,
+    token_budget: int,
+) -> dict:
     """
-    Safe fallback returned when synthesizer fails.
-    Maps RoBERTa emotion to a reasonable intensity so the LLM
-    still gets a useful signal even in degraded mode.
+    Python-level safety enforcement.
+    Crisis overrides are NEVER left to the LLM to get right.
+    If is_crisis is True, this function guarantees:
+      - message_class = "crisis"
+      - token_budget  >= CRISIS_TOKEN_FLOOR
+      - recommended_tone = "crisis_support"
+      - crisis_type is a valid non-null value
     """
-    high_intensity_emotions = {"grief", "despair", "fear", "anger", "disgust", "sadness"}
-    intensity = "high" if roberta_emotion in high_intensity_emotions else "moderate"
+    if is_crisis:
+        if crisis_type not in ("suicidal_ideation", "self_harm", "acute_breakdown", "other"):
+            crisis_type = "other"
+        return {
+            "llm_sentiment":    result.get("llm_sentiment", "distress"),
+            "category":         result.get("category", "crisis"),
+            "intensity":        "severe",           # crisis is always severe
+            "is_crisis":        True,
+            "crisis_type":      crisis_type,
+            "reasoning":        result.get("reasoning", "Crisis detected."),
+            "recommended_tone": "crisis_support",   # always override on crisis
+            "message_class":    "crisis",           # always override on crisis
+            "token_budget":     CRISIS_TOKEN_FLOOR, # always full budget on crisis
+        }
+
+    # Non-crisis: return cleaned validated result
+    return {
+        "llm_sentiment":    result.get("llm_sentiment", "unknown"),
+        "category":         result.get("category", "general"),
+        "intensity":        intensity,
+        "is_crisis":        False,
+        "crisis_type":      None,
+        "reasoning":        result.get("reasoning", ""),
+        "recommended_tone": rec_tone,
+        "message_class":    msg_class,
+        "token_budget":     token_budget,
+    }
+
+
+def _fallback_consensus(roberta_emotion: str = "neutral", turn_count: int = 0) -> dict:
+    """
+    Safe fallback when synthesizer fails completely.
+    Always conservative — uses emotional_ongoing class and validating tone.
+    Never returns is_crisis=True in fallback (cannot confirm without LLM).
+    """
+    high_intensity = {"grief", "despair", "fear", "anger", "disgust", "sadness"}
+    intensity      = "high" if roberta_emotion in high_intensity else "moderate"
+    msg_class      = "first_disclosure" if turn_count <= 2 else "emotional_ongoing"
 
     return {
         "llm_sentiment":    roberta_emotion,
@@ -167,4 +339,6 @@ def _fallback_consensus(roberta_emotion: str = "neutral") -> dict:
         "crisis_type":      None,
         "reasoning":        "Fallback — synthesizer unavailable. Using RoBERTa emotion directly.",
         "recommended_tone": "validating",
+        "message_class":    msg_class,
+        "token_budget":     MESSAGE_CLASS_BUDGETS[msg_class],
     }

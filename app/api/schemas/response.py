@@ -13,6 +13,7 @@ class ChatResponse(BaseModel):
     reply: str
     emotion: EmotionData
     session_id: str
+    sadness_scores: list[float] = []   # returned to frontend for next request
 
 
 class TranscriptionResponse(BaseModel):

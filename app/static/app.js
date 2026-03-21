@@ -18,9 +18,10 @@
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const state = {
-    phase: 'intake',       // 'intake' | 'chat'
+    phase: 'intake',
+    turnCount: 0,
     intakeStep: 1,         // 1 = name, 2 = mood, 3 = topic
-    profile: { name: '', mood_score: null, topic: '' },
+    profile: { name: '', mood_score: null, topic: '', country: 'IN' },
     sessionId: null,
     history: [],           // [{role, content}] — sent to backend each turn
     sadnessScores: [],     // float[] — for trend monitoring
@@ -49,6 +50,16 @@ const dom = {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 (function init() {
+    // Auto-detect country for crisis line selection
+    try {
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+        if (tz.includes("Asia/Kolkata") || tz.includes("Asia/Calcutta")) state.profile.country = "IN";
+        else if (tz.startsWith("America/")) state.profile.country = "US";
+        else if (tz.startsWith("Europe/London")) state.profile.country = "UK";
+        else if (tz.startsWith("Australia/")) state.profile.country = "AU";
+        else if (tz.startsWith("America/Toronto") || tz.startsWith("America/Vancouver")) state.profile.country = "CA";
+    } catch (e) { }
+
     // Intake: first bot message
     appendBotBubble(
         `Before we begin, I'd like to ask a few quick questions so I can understand how you're feeling.\n\nYour answers stay private and help me be here for you properly.`,
@@ -236,8 +247,8 @@ async function handleChatSend(text) {
                 session_id: state.sessionId,
                 message: text,
                 profile: state.profile,
-                history: state.history.slice(-40),    // last 20 turns (user+assistant)
-                sadness_scores: state.sadnessScores,
+                history: state.history.slice(-40),
+                sadness_scores: state.sadnessScores,   // send current scores to backend
             }),
         });
 
@@ -267,6 +278,10 @@ async function handleChatSend(text) {
                     if (payload.done) {
                         bubbleEl.classList.remove('stream-cursor');
                         emotionData = payload.emotion;
+                        // Server returns updated sadness scores — keep them for next request
+                        if (payload.emotion?.sadness_scores) {
+                            state.sadnessScores = payload.emotion.sadness_scores;
+                        }
                     }
                 } catch { /* partial JSON — ignore */ }
             }
@@ -281,15 +296,12 @@ async function handleChatSend(text) {
     // Append emotion badge if available
     if (emotionData && emotionData.dominant_emotion && emotionData.dominant_emotion !== 'neutral') {
         appendEmotionBadge(rowEl, emotionData.dominant_emotion);
-        // Accumulate sadness score for trend tracking
-        if (emotionData.dominant_emotion === 'sadness') {
-            const score = 0.7;  // approximate; full score comes from non-streaming endpoint
-            state.sadnessScores = [...state.sadnessScores.slice(-9), score];
-        }
     }
 
     // Save assistant reply to history
     state.history.push({ role: 'assistant', content: fullReply });
+    state.turnCount++;
+    updatePhaseIndicator();
 
     // TTS if enabled
     if (state.voiceEnabled && 'speechSynthesis' in window && fullReply) {
@@ -503,4 +515,18 @@ function scrollBottom() {
     requestAnimationFrame(() => {
         dom.messages.scrollTo({ top: dom.messages.scrollHeight, behavior: 'smooth' });
     });
+}
+
+// ── Phase indicator (subtle visual feedback in header) ────────────────────────
+function updatePhaseIndicator() {
+    const phases = { 0: null, 3: 'exploring', 6: 'here for you', 11: 'with you' };
+    // Just update document title subtly
+    const t = state.turnCount;
+    if (t === 3) {
+        const el = document.querySelector('.header-status');
+        if (el) el.innerHTML = '<span class="status-dot"></span>Listening deeply';
+    } else if (t === 6) {
+        const el = document.querySelector('.header-status');
+        if (el) el.innerHTML = '<span class="status-dot"></span>Here with you';
+    }
 }

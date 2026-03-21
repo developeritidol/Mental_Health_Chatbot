@@ -75,21 +75,33 @@ class EmotionResult:
         }
 
 
-async def analyse(text: str) -> EmotionResult:
+async def analyse(text: str, context_window: Optional[str] = None) -> EmotionResult:
     """
     Analyse `text` and return an EmotionResult.
+
+    `context_window` — optional: pass the last 1–2 turns of conversation
+    concatenated as a string. This prevents misclassification of short
+    ambiguous fragments like "just useless" (which RoBERTa alone reads as
+    'annoyance' rather than 'hopelessness' without context).
+
     Falls back to neutral if the model is unavailable.
     """
-    # Run in thread pool — transformers inference is CPU-blocking
+    # For very short messages, prepend context so the model has enough signal
+    inference_text = text
+    if context_window and len(text.split()) <= 6:
+        # Trim context to avoid exceeding 512 tokens
+        ctx = context_window[-300:]
+        inference_text = f"{ctx} {text}".strip()
+
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, _run_inference, text)
+    result = await loop.run_in_executor(None, _run_inference, inference_text, text)
     return result
 
 
-def _run_inference(text: str) -> EmotionResult:
-    # ── Crisis keyword check (fast, no model needed) ──────────────────────────
-    text_lower = text.lower()
-    crisis_signal = any(phrase in text_lower for phrase in CRISIS_SIGNAL_PHRASES)
+def _run_inference(text: str, original_text: Optional[str] = None) -> EmotionResult:
+    # ── Crisis keyword check — always on the raw user message, not the context window ──
+    check_text = (original_text or text).lower()
+    crisis_signal = any(phrase in check_text for phrase in CRISIS_SIGNAL_PHRASES)
 
     # ── Model inference ───────────────────────────────────────────────────────
     pipe = _load_pipeline()

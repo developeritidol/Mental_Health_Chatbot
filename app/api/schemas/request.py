@@ -6,6 +6,7 @@ class UserProfile(BaseModel):
     name: str = Field(..., min_length=1, max_length=80)
     mood_score: int = Field(..., ge=1, le=10)
     topic: str = Field(..., min_length=1)
+    country: str = Field(default="IN")   # ISO 2-letter code for crisis line selection
 
 
 class ChatRequest(BaseModel):

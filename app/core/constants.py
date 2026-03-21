@@ -1,94 +1,187 @@
-# ── Emotion → Response Mode Mapping ─────────────────────────────────────────
-# Maps dominant GoEmotions labels to a conversation strategy.
-# The strategy name is injected into the system prompt to guide the LLM.
+# ── Conversation Phase Tracker ────────────────────────────────────────────────
+CONVERSATION_PHASES = {
+    "opening":       (0, 2),
+    "exploring":     (3, 5),
+    "intervening":   (6, 10),
+    "sustaining":    (11, 999),
+}
 
+def get_conversation_phase(turn_count: int) -> str:
+    for phase, (start, end) in CONVERSATION_PHASES.items():
+        if start <= turn_count <= end:
+            return phase
+    return "sustaining"
+
+
+# ── Emotion → Response Mode Mapping ──────────────────────────────────────────
 EMOTION_MODE_MAP = {
-    # Deep distress
-    "sadness":      "validate_and_sit_with",
-    "grief":        "validate_and_sit_with",
-    "remorse":      "validate_and_sit_with",
-
-    # Fear / anxiety
-    "fear":         "ground_and_stabilise",
-    "nervousness":  "ground_and_stabilise",
-    "anxiety":      "ground_and_stabilise",
-
-    # Anger
-    "anger":        "acknowledge_and_explore_underneath",
-    "annoyance":    "acknowledge_and_explore_underneath",
-    "disgust":      "acknowledge_and_explore_underneath",
-
-    # Hopelessness — elevated watchfulness
-    "hopelessness": "gentle_watchful_presence",
-    "despair":      "gentle_watchful_presence",
-
-    # Loneliness / disconnection
-    "loneliness":   "make_specifically_seen",
-
-    # Confusion / overwhelm
-    "confusion":    "slow_down_and_untangle",
-    "embarrassment":"slow_down_and_untangle",
-
-    # Positive / neutral
-    "joy":          "affirm_and_deepen",
-    "excitement":   "affirm_and_deepen",
-    "gratitude":    "affirm_and_deepen",
-    "neutral":      "curious_exploration",
-    "caring":       "curious_exploration",
+    "sadness":       "validate_then_offer",
+    "grief":         "validate_then_offer",
+    "remorse":       "validate_then_offer",
+    "fear":          "ground_and_stabilise",
+    "nervousness":   "ground_and_stabilise",
+    "anxiety":       "ground_and_stabilise",
+    "anger":         "acknowledge_and_explore_underneath",
+    "annoyance":     "acknowledge_and_explore_underneath",
+    "disgust":       "acknowledge_and_explore_underneath",
+    "hopelessness":  "crisis_presence",
+    "despair":       "crisis_presence",
+    "loneliness":    "make_specifically_seen",
+    "confusion":     "slow_down_and_untangle",
+    "embarrassment": "slow_down_and_untangle",
+    "joy":           "affirm_and_deepen",
+    "excitement":    "affirm_and_deepen",
+    "gratitude":     "affirm_and_deepen",
+    "admiration":    "affirm_and_deepen",
+    "love":          "affirm_and_deepen",
+    "neutral":       "curious_exploration",
+    "caring":        "curious_exploration",
 }
 
 RESPONSE_MODE_INSTRUCTIONS = {
-    "validate_and_sit_with": (
-        "They are in real pain right now. Your only job is to sit with them — "
-        "not fix, not reframe, not offer hope yet. Reflect the exact weight of what they said. "
-        "Be slow. Be specific. Ask one gentle question about what this is like for them."
+    "validate_then_offer": (
+        "Validate the pain first with specific, non-generic language. "
+        "Then — depending on how many turns deep you are — begin offering something back: "
+        "a normalisation, a gentle reframe, or a small grounding tool. "
+        "Do NOT keep the response as pure exploration after turn 3."
     ),
     "ground_and_stabilise": (
-        "They are anxious or afraid. Bring them gently into the present moment. "
-        "Be calm and steady. Don't escalate the topic — focus on right now, what they can feel and hear. "
-        "Ask one grounding question or offer one small calming anchor."
+        "Name the anxiety/fear explicitly first. Then offer one specific grounding technique: "
+        "box breathing (4-4-4-4), 5-4-3-2-1 sensory check, or feet-on-floor awareness. "
+        "Keep it simple. One question after."
     ),
     "acknowledge_and_explore_underneath": (
-        "They are angry or frustrated. Don't try to calm the anger — name it, validate it fully first. "
-        "Anger almost always has hurt or fear underneath it. Once they feel heard, gently explore what's under the surface. "
-        "Never dismiss or minimise the anger."
+        "Name the anger fully first — do not soften it. "
+        "Then gently ask what the anger is protecting: the hurt or fear underneath. "
+        "Never rush to calm them."
     ),
-    "gentle_watchful_presence": (
-        "They are expressing hopelessness or despair. Be an exceptionally warm, steady presence. "
-        "Do NOT immediately suggest resources or hotlines — build safety through connection first. "
-        "Ask small, caring, curious questions that invite them to stay in the conversation. "
-        "Gently distinguish between exhaustion and something more urgent, through the conversation itself."
+    "crisis_presence": (
+        "CRISIS MODE. Primary job: make them feel less alone RIGHT NOW — not refer them away.\n"
+        "Step 1: Deeply reflect what they're carrying with warmth.\n"
+        "Step 2: Ask directly but gently: 'When you say that, are you having thoughts of hurting yourself?'\n"
+        "Step 3: If yes — stay with them. Say: 'Your life has weight. I'm not going anywhere.'\n"
+        "Step 4: Mention a LOCALLY RELEVANT crisis line. If user is likely Indian: 'iCall (9152987821) has "
+        "people trained for exactly this kind of pain.' If country unknown: 'A local crisis line — search "
+        "crisis helpline + your country — connects you with someone trained in this specific pain.'\n"
+        "Step 5: Come back: 'Right now, I am here. What would help you feel less alone in this moment?'\n"
+        "NEVER just paste '988' for someone who is not in the US.\n"
+        "NEVER repeat the same crisis referral twice in a row.\n"
+        "NEVER refer and abandon — always return to the person after mentioning support."
     ),
     "make_specifically_seen": (
-        "They are feeling lonely or disconnected. The most powerful thing you can do is make them feel "
-        "SPECIFICALLY seen — not 'I understand loneliness' but reflecting back the unique details of their situation. "
-        "Notice the small things they said. Make them feel like a person, not a category."
+        "Reflect the SPECIFIC texture of their loneliness — not generic. "
+        "Then acknowledge the act of reaching out: 'Coming here and saying this took something.' "
+        "Ask what connection would look like for them right now."
     ),
     "slow_down_and_untangle": (
-        "They are overwhelmed or confused. Slow the pace. Don't address everything at once. "
-        "Help them pick one thread to follow. Simplify gently. One thing at a time."
+        "Name the overwhelm. Help them pick ONE thread. "
+        "Don't address everything at once. Simplify and slow down."
     ),
     "affirm_and_deepen": (
-        "They are in a relatively positive or grateful place. Affirm this genuinely. "
-        "Don't just validate surface-level positivity — deepen it. Ask what's contributing to this feeling. "
-        "Help them understand and anchor the good."
+        "Anchor the positive moment — don't just acknowledge it. "
+        "If they opened up or did something difficult: name the ACT explicitly. "
+        "'You just said out loud what you've carried silently — that takes real courage.' "
+        "Help them feel the weight of the positive thing."
     ),
     "curious_exploration": (
-        "Approach with warm, open curiosity. Ask one meaningful question that helps them go a little deeper "
-        "into whatever they've shared. Don't assume you know how they feel — explore it with them."
+        "Warm curiosity. Reflect what you heard, then ask one question "
+        "that goes one layer deeper into the specifics."
     ),
 }
 
-# ── Crisis Signal Keywords ────────────────────────────────────────────────────
-# Used ONLY for backend logging/monitoring — NOT for immediate bot response.
-# The LLM handles the conversation naturally; these feed the emotion trend tracker.
+
+# ── Phase-Based Intervention Instructions ─────────────────────────────────────
+PHASE_INSTRUCTIONS = {
+    "opening": (
+        "PHASE: OPENING (turn 1-2). Focus entirely on making them feel safe and heard. "
+        "Pure warm listening. No advice. No techniques yet. End with one open question. "
+        "Length: 3-4 sentences."
+    ),
+    "exploring": (
+        "PHASE: EXPLORING (turn 3-5). You understand the broad shape of what they are carrying. "
+        "You may now include ONE small normalisation per response — something that helps them feel "
+        "less alone or less broken. Examples: "
+        "'What you are describing is one of the most exhausting things a person can carry.' "
+        "'It makes complete sense you needed to say this out loud.' "
+        "Still end with one question. But stop being ONLY questions. "
+        "Length: 4-5 sentences."
+    ),
+    "intervening": (
+        "PHASE: INTERVENING (turn 6-10). You know this person now. START GIVING BACK. "
+        "Every response MUST contain at least ONE of: "
+        "(A) Normalisation: 'This is not weakness. This is what carrying too much alone does to a person.' "
+        "(B) Gentle reframe: 'The fact that you are still here, still talking, says something real about you.' "
+        "(C) Small practical tool: box breathing (4-4-4-4), 5-4-3-2-1 grounding, or one tiny action for tonight. "
+        "(D) Warmth acknowledgment: 'I want you to know that what you shared here matters.' "
+        "(E) Strength recognition: noticing something courageous or resilient in what they did or said. "
+        "Then still ask ONE question. Make the response feel like something was OFFERED, not just taken. "
+        "Length: 5-7 sentences."
+    ),
+    "sustaining": (
+        "PHASE: SUSTAINING (turn 11+). You have a real relationship with this person. Be their anchor. "
+        "Every response must: "
+        "1. Reference something specific they shared earlier in the conversation. "
+        "2. Offer at least one thing they can hold onto — a thought, a small action, or a truth. "
+        "3. Help them see any small movement they have made, however tiny. "
+        "4. Feel like a warm, consistent, unwavering presence. "
+        "End with ONE question that builds on everything they've shared. "
+        "Length: 5-8 sentences."
+    ),
+}
+
+
+# ── Crisis Signal Keywords ─────────────────────────────────────────────────────
 CRISIS_SIGNAL_PHRASES = [
-    "want to die", "kill myself", "end my life", "don't want to be here",
-    "suicide", "no reason to live", "better off dead", "want it to stop",
-    "can't go on", "not worth living", "disappear forever",
+    "want to die", "kill myself", "end my life", "should just end",
+    "don't want to be here", "suicide", "no reason to live",
+    "better off dead", "want it to stop", "can't go on",
+    "not worth living", "disappear forever", "end it all",
+    "what's the point of living", "point of living",
+    "should end my life", "just end my life",
 ]
 
-# ── Mood Score Labels ─────────────────────────────────────────────────────────
+# Self-label words that must always be addressed in the first sentence
+SELF_LABEL_WORDS = [
+    "useless", "worthless", "failure", "burden", "pathetic",
+    "stupid", "loser", "waste", "nothing", "hopeless", "broken",
+    "disgusting", "weak", "coward", "ugly", "unlovable",
+]
+
+# Country-specific crisis lines
+CRISIS_LINES = {
+    "IN": "iCall (India): 9152987821",
+    "US": "988 Suicide & Crisis Lifeline: call or text 988",
+    "UK": "Samaritans: 116 123",
+    "AU": "Lifeline Australia: 13 11 14",
+    "CA": "Crisis Services Canada: 1-833-456-4566",
+    "default": "your local crisis line (search 'crisis helpline [your country]')",
+}
+
+# Grounding techniques library
+GROUNDING_TECHNIQUES = {
+    "box_breathing": (
+        "Box breathing: breathe in for 4 counts, hold 4, out 4, hold 4. Repeat 3 times. "
+        "This activates the body's calm response within minutes."
+    ),
+    "5_4_3_2_1": (
+        "5-4-3-2-1 grounding: name 5 things you can see, 4 you can touch, "
+        "3 you can hear, 2 you can smell, 1 you can taste. "
+        "This pulls you into right now and interrupts the spiral."
+    ),
+    "one_small_thing": (
+        "When everything feels impossible: just the next 10 minutes. "
+        "Not fixing everything — just one tiny action. Get water. Sit outside. "
+        "Text one word to someone. Movement in any direction interrupts the freeze."
+    ),
+    "self_compassion": (
+        "Say to yourself: 'This is a moment of suffering. Suffering is part of being human. "
+        "May I be kind to myself right now.' "
+        "This is from evidence-based therapy and can be used whenever self-criticism gets loud."
+    ),
+}
+
+
+# ── Mood Score Labels ──────────────────────────────────────────────────────────
 MOOD_LABELS = {
     range(1, 4):   "really struggling right now",
     range(4, 6):   "going through something genuinely difficult",
@@ -103,7 +196,8 @@ def get_mood_label(score: int) -> str:
             return label
     return "somewhere in the middle"
 
-# ── Topic Descriptions ────────────────────────────────────────────────────────
+
+# ── Topic Descriptions ─────────────────────────────────────────────────────────
 TOPIC_DESCRIPTIONS = {
     "Stress & anxiety":   "stress and anxiety that has been weighing on them",
     "Feeling lonely":     "loneliness and a sense of disconnection",

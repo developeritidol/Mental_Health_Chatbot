@@ -50,9 +50,15 @@ async def send_message(req: ChatRequest):
 
     profile_dict = req.profile.model_dump()
 
-    # Run emotion analysis
+    # Build context window for emotion model (last bot + last user turn)
+    context_window = None
+    if req.history and len(req.history) >= 2:
+        recent = req.history[-4:]   # up to last 2 turns
+        context_window = " ".join(m.get("content", "") for m in recent)
+
+    # Run emotion analysis with conversational context for short messages
     try:
-        emotion_result = await emotion_svc.analyse(req.message)
+        emotion_result = await emotion_svc.analyse(req.message, context_window=context_window)
     except Exception as e:
         logger.error(f"Emotion analysis failed: {e}")
         emotion_result = None
@@ -65,21 +71,24 @@ async def send_message(req: ChatRequest):
     except Exception as e:
         logger.warning(f"Safety check failed silently: {e}")
 
-    # Emotion trend check (for monitoring)
-    if emotion_result and req.sadness_scores:
-        sadness_now = emotion_result.scores.get("sadness", 0.0)
-        trend = check_emotion_trend(req.sadness_scores + [sadness_now])
+    # Emotion trend tracking — accumulate sadness scores
+    sadness_now = emotion_result.scores.get("sadness", 0.0) if emotion_result else 0.0
+    updated_sadness = (req.sadness_scores + [sadness_now])[-10:]  # keep last 10
+
+    if emotion_result and len(updated_sadness) >= 2:
+        trend = check_emotion_trend(updated_sadness)
         if trend["trending_down"] and trend["severity"] == "high":
             logger.warning(
                 f"[TREND] Escalating sadness in session {req.session_id}: {trend}"
             )
 
-    # Call LLM
+    # Call LLM with full context
     reply = await llm_svc.chat(
         user_message=req.message,
         profile=profile_dict,
         history=req.history,
         emotion=emotion_result,
+        sadness_trend=updated_sadness,
     )
 
     emotion_data = EmotionData(
@@ -93,6 +102,7 @@ async def send_message(req: ChatRequest):
         reply=reply,
         emotion=emotion_data,
         session_id=req.session_id,
+        sadness_scores=updated_sadness,
     )
 
 
@@ -105,10 +115,19 @@ async def stream_message(req: ChatRequest):
     """
     profile_dict = req.profile.model_dump()
 
+    # Build context window for short-message emotion accuracy
+    context_window = None
+    if req.history and len(req.history) >= 2:
+        recent = req.history[-4:]
+        context_window = " ".join(m.get("content", "") for m in recent)
+
     try:
-        emotion_result = await emotion_svc.analyse(req.message)
+        emotion_result = await emotion_svc.analyse(req.message, context_window=context_window)
     except Exception:
         emotion_result = None
+
+    sadness_now = emotion_result.scores.get("sadness", 0.0) if emotion_result else 0.0
+    updated_sadness = (req.sadness_scores + [sadness_now])[-10:]
 
     async def generate():
         full_reply = []
@@ -118,15 +137,16 @@ async def stream_message(req: ChatRequest):
                 profile=profile_dict,
                 history=req.history,
                 emotion=emotion_result,
+                sadness_trend=updated_sadness,
             ):
                 full_reply.append(chunk)
                 yield f"data: {json.dumps({'chunk': chunk})}\n\n"
 
-            # Send final metadata event
             emotion_dict = {
                 "dominant_emotion": emotion_result.dominant if emotion_result else "neutral",
                 "response_mode": emotion_result.mode if emotion_result else "curious_exploration",
                 "is_crisis_signal": emotion_result.is_crisis_signal if emotion_result else False,
+                "sadness_scores": updated_sadness,
             }
             yield f"data: {json.dumps({'done': True, 'emotion': emotion_dict})}\n\n"
 

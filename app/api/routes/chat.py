@@ -120,8 +120,10 @@ async def stream_message(req: ChatRequest):
     """
     profile_dict = req.profile.model_dump()
 
-    logger.info(f"Chat Stream — New request (session={req.session_id})")
-    logger.info(f"Chat Stream — Message: '{req.message[:50]}...'")
+    logger.info("\n" + "═" * 70)
+    logger.info(f"[NEW REQUEST] Session: {req.session_id}")
+    logger.info(f"[USER QUERY]: {req.message}")
+    logger.info("═" * 70)
 
     # Build context window for short-message emotion accuracy
     context_window = None
@@ -130,26 +132,27 @@ async def stream_message(req: ChatRequest):
         context_window = " ".join(m.get("content", "") for m in recent)
 
     try:
-        logger.info("Chat Stream — Calling emotion service...")
+        logger.info("[STEP 1] Running Emotion Analysis (RoBERTa)...")
         emotion_result = await emotion_svc.analyse(req.message, context_window=context_window)
         if emotion_result:
-            logger.info(f"Chat Stream — Emotion detected: {emotion_result.dominant} (mode: {emotion_result.mode})")
+            logger.info(f"[STEP 1 RESULT] Dominant: {emotion_result.dominant} | Top scores: {emotion_result.scores}")
     except Exception as e:
-        logger.error(f"Chat Stream — Emotion analysis failed: {e}")
+        logger.error(f"[STEP 1 ERROR] Emotion analysis failed: {e}")
         emotion_result = None
 
     sadness_now = emotion_result.scores.get("sadness", 0.0) if emotion_result else 0.0
     updated_sadness = (req.sadness_scores + [sadness_now])[-10:]
 
-    logger.info("Chat Stream — Running LLM Consensus Synthesizer...")
+    logger.info("[STEP 2] Running Safety & Consensus Synthesizer (Llama-3-8B)...")
     try:
         consensus = await synthesize_consensus(
             text=req.message,
             roberta_emotion=emotion_result.dominant if emotion_result else "neutral",
             roberta_score=sadness_now
         )
+        logger.info(f"[STEP 2 RESULT] Category: {consensus.get('category')} | Crisis: {consensus.get('is_crisis')} | Reason: {consensus.get('reasoning')}")
     except Exception as e:
-        logger.error(f"Chat Stream — Consensus Synthesizer failed: {e}")
+        logger.error(f"[STEP 2 ERROR] Consensus Synthesizer failed: {e}")
         consensus = {
             "llm_sentiment": "neutral", 
             "category": "general", 
@@ -157,7 +160,7 @@ async def stream_message(req: ChatRequest):
             "reasoning": "fallback"
         }
 
-    logger.info("Chat Stream — Starting LLM generation...")
+    logger.info("[STEP 3] Generating AI Response (Groq stream)...")
 
     async def generate():
         full_reply = []
@@ -173,11 +176,16 @@ async def stream_message(req: ChatRequest):
 
             emotion_dict = {
                 "dominant_emotion": emotion_result.dominant if emotion_result else "neutral",
-                "response_mode": emotion_result.mode if emotion_result else "curious_exploration",
-                "is_crisis_signal": emotion_result.is_crisis_signal if emotion_result else False,
+                "response_mode": consensus.get("category", "general"),
+                "is_crisis_signal": consensus.get("is_crisis", False),
                 "sadness_scores": updated_sadness,
             }
             yield f"data: {json.dumps({'done': True, 'emotion': emotion_dict})}\n\n"
+            
+            # Log the final assembled reply
+            final_reply_text = ''.join(full_reply)
+            logger.info("[STEP 3 RESULT] Streaming complete.")
+            logger.info(f"[FINAL AI RESPONSE]:\n{final_reply_text}\n" + "═" * 70)
 
         except Exception as e:
             logger.error(f"Streaming error: {e}")

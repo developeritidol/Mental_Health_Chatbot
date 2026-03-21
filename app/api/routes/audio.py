@@ -1,60 +1,59 @@
 """
-Audio API route.
-Handles Speech-to-Text via Groq's whisper model.
+Audio Routes
+─────────────
+POST /api/audio/transcribe — accepts audio file, returns transcript via Groq Whisper
 """
 
+import io
 from fastapi import APIRouter, UploadFile, File, HTTPException
+from groq import AsyncGroq
+
 from app.core.config import get_settings
+from app.api.schemas.response import TranscriptionResponse
 from app.core.logger import get_logger
-import httpx
 
 logger = get_logger(__name__)
-router = APIRouter(prefix="/api/audio", tags=["Audio"])
+settings = get_settings()
+router = APIRouter(prefix="/api/audio", tags=["audio"])
 
-@router.post("/transcribe")
+ALLOWED_MIME = {
+    "audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg",
+    "audio/wav", "audio/x-wav", "audio/flac",
+}
+
+
+@router.post("/transcribe", response_model=TranscriptionResponse)
 async def transcribe_audio(file: UploadFile = File(...)):
     """
-    Accepts an audio file upload from the frontend and sends it to Groq's
-    whisper-large-v3 model for transcription. Returns the text.
+    Accepts an audio blob from the browser (MediaRecorder output, typically webm/ogg).
+    Sends it to Groq's Whisper large-v3 model and returns the transcript.
     """
-    settings = get_settings()
+    if file.content_type and file.content_type not in ALLOWED_MIME:
+        logger.warning(f"Unsupported audio type: {file.content_type}")
 
-    if not file.filename.endswith(('.webm', '.m4a', '.mp3', '.mp4', '.mpeg', '.mpga', '.wav')):
-        raise HTTPException(status_code=400, detail="Unsupported audio format")
-
-    logger.info(f"Audio — Received transcription request (size: {file.size} bytes)")
+    audio_bytes = await file.read()
+    if len(audio_bytes) < 100:
+        raise HTTPException(status_code=400, detail="Audio file is too small or empty.")
 
     try:
-        content = await file.read()
-        
-        # Send directly directly to Groq's Audio API using httpx
-        url = "https://api.groq.com/openai/v1/audio/transcriptions"
-        headers = {
-            "Authorization": f"Bearer {settings.GROQ_API_KEY}"
-        }
-        
-        files = {
-            "file": (file.filename, content, file.content_type)
-        }
-        
-        data = {
-            "model": "whisper-large-v3",
-            "response_format": "json"
-        }
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, headers=headers, files=files, data=data, timeout=30.0)
-            response.raise_for_status()
-            
-            result = response.json()
-            transcribed_text = result.get("text", "").strip()
-            
-            logger.info(f"Audio — Transcription success: '{transcribed_text[:40]}...'")
-            return {"text": transcribed_text}
-            
-    except httpx.HTTPError as e:
-        logger.error(f"Audio — Groq API error: {e}")
-        raise HTTPException(status_code=502, detail="Failed to contact transcription service")
+        client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+
+        # Groq Whisper expects a (filename, bytes, content_type) tuple
+        filename = file.filename or "recording.webm"
+        transcription = await client.audio.transcriptions.create(
+            file=(filename, audio_bytes, file.content_type or "audio/webm"),
+            model=settings.GROQ_WHISPER_MODEL,
+            response_format="verbose_json",
+        )
+
+        text = transcription.text.strip()
+        language = getattr(transcription, "language", None)
+        duration = getattr(transcription, "duration", None)
+
+        logger.debug(f"Whisper transcript: '{text[:60]}...' lang={language}")
+
+        return TranscriptionResponse(text=text, language=language, duration=duration)
+
     except Exception as e:
-        logger.error(f"Audio — Unexpected error: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(f"Whisper transcription error: {e}")
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")

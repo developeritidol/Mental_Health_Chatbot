@@ -1,21 +1,18 @@
-# Mental Health Chatbot - Dependencies
+# Web framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.12    # needed for file uploads (Whisper)
+pydantic==2.9.0
+pydantic-settings==2.5.2
 
-fastapi>=0.115.0
-uvicorn[standard]>=0.34.0
-pydantic>=2.0
-pydantic-settings>=2.0
-python-dotenv>=1.0.0
-python-multipart>=0.0.9
+# Groq — LLM + Whisper
+groq==0.11.0
+httpx==0.27.2
 
-# AI / ML
-groq>=0.18.0
-langchain>=0.3.0
-langgraph>=0.2.0
-langchain-groq>=0.2.0
-langchain-core>=0.3.0
-transformers>=4.40.0
-torch>=2.0.0
+# HuggingFace — local emotion model
+transformers==4.44.2
+torch==2.4.1                # CPU build is fine; use torch+cu121 for GPU
+# onnxruntime==1.19.2       # optional: swap transformers for 2x faster CPU inference
 
-# Testing
-pytest>=8.0.0
-httpx>=0.27.0
+# Logging / utilities
+python-dotenv==1.0.1

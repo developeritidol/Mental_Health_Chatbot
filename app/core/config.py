@@ -1,41 +1,35 @@
-"""
-Application configuration loaded from environment variables via pydantic-settings.
-"""
-
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    """Application settings loaded from .env file."""
+    # App
+    APP_NAME: str = "MindBridge"
+    APP_VERSION: str = "1.0.0"
+    DEBUG: bool = False
 
-    # -- Groq LLM --
+    # Groq LLM
     GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "openai/gpt-oss-120b"
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"   # Best quality on Groq
 
-    # -- HuggingFace Emotion Model --
-    SENTIMENT_MODEL: str = "j-hartmann/emotion-english-distilroberta-base"
+    # Groq Whisper (STT)
+    GROQ_WHISPER_MODEL: str = "whisper-large-v3"
 
-    # -- App --
-    APP_ENV: str = "development"
-    APP_HOST: str = "0.0.0.0"
-    APP_PORT: int = 8000
+    # HuggingFace Emotion Model (runs locally via transformers)
+    # 28-label GoEmotions — far richer than the 7-label alternative
+    HF_EMOTION_MODEL: str = "SamLowe/roberta-base-go_emotions"
+    HF_API_TOKEN: str = ""        # only needed if using HF Inference API fallback
 
-    # -- LLM Parameters --
-    LLM_TEMPERATURE: float = 0.7
-    LLM_MAX_TOKENS: int = 1000
+    # Session
+    MAX_HISTORY_TURNS: int = 20   # last N turns kept in memory
+    MAX_TOKENS: int = 900
 
-    # -- Memory --
-    MEMORY_WINDOW_SIZE: int = 20  # Keep last N messages (5 user + 5 assistant turns)
-
-    model_config = {
-        "env_file": ".env",
-        "env_file_encoding": "utf-8",
-        "extra": "ignore",
-    }
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 @lru_cache()
 def get_settings() -> Settings:
-    """Returns a cached Settings instance."""
     return Settings()

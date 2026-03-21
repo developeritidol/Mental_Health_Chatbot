@@ -55,8 +55,10 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 @app.get("/", include_in_schema=False)
 async def serve_ui():
+    logger.info("Serving UI index.html")
     return FileResponse("app/static/index.html")
 
 @app.get("/health")
 async def health():
+    logger.info("Health check endpoint hit")
     return {"status": "ok", "app": settings.APP_NAME}

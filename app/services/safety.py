@@ -1,57 +1,82 @@
 """
-Safety Service
-───────────────
-Lightweight crisis signal detection running in parallel with the LLM call.
-Does NOT interrupt the conversation — the LLM handles that naturally.
-This service is purely for backend logging, monitoring, and future escalation.
+Safety & Consensus Service
+──────────────────────────
+This acts as the Hybrid Consensus Synthesizer (Llama-3-8b).
+It reads the raw user text AND the RoBERTa statistical emotion,
+cross-validates them, and generates a structured clinical JSON
+containing the logical category, true sentiment, and an active crisis flag.
 """
 from __future__ import annotations
-from app.core.constants import CRISIS_SIGNAL_PHRASES
+import json
+from groq import AsyncGroq
+from app.core.config import get_settings
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
+settings = get_settings()
+
+def _get_client() -> AsyncGroq:
+    return AsyncGroq(api_key=settings.GROQ_API_KEY)
 
 
-def check_crisis_signals(text: str, session_id: str) -> dict:
+async def synthesize_consensus(text: str, roberta_emotion: str, roberta_score: float) -> dict:
     """
-    Returns a dict with crisis detection results.
-    Any detected signals are logged for specialist review.
+    Executes the LLM Sentiment & Crisis Synthesizer (Llama-3-8B).
+    Returns a structured dictionary with:
+      - llm_sentiment: The verified emotional state
+      - category: The dynamic conversational theme (e.g. 'burnout', 'grief')
+      - is_crisis: True if active suicidal ideation or threat to life
+      - reasoning: Explanation for the synthesis
     """
-    text_lower = text.lower()
-    triggered = [p for p in CRISIS_SIGNAL_PHRASES if p in text_lower]
-
-    result = {
-        "is_crisis": len(triggered) > 0,
-        "triggered_phrases": triggered,
-        "session_id": session_id,
-    }
-
-    if result["is_crisis"]:
-        logger.warning(
-            f"[SAFETY] Crisis signal detected in session {session_id}: {triggered}"
+    logger.info(f"Synthesizing consensus for text: '{text[:50]}...'")
+    client = _get_client()
+    
+    system_prompt = (
+        "You are an expert clinical sentiment analyzer and crisis triage AI.\n"
+        "Your job is to read the user's text and the raw statistical emotion provided by an NLP model, "
+        "and synthesize them into a logical consensus.\n"
+        "You must respond in strictly valid JSON with exactly these keys:\n"
+        '{"llm_sentiment": "string", "category": "string", "is_crisis": boolean, "reasoning": "string"}\n\n'
+        "RULES:\n"
+        "1. Dynamic Category: Discover the category freely based on the text (e.g., 'severe_burnout', 'relationship_conflict', 'financial_stress').\n"
+        "2. is_crisis MUST be exactly false unless the user explicitly mentions self-harm, wanting to die, or an active threat to life.\n"
+        "3. Reasoning: Provide a brief 1-sentence explanation of why is_crisis is true or false."
+    )
+    
+    user_prompt = f"User Text: \"{text}\"\nRaw RoBERTa Emotion: {roberta_emotion} (score: {roberta_score:.2f})"
+    
+    try:
+        response = await client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+            max_tokens=250,
         )
-
-    return result
-
-
-def check_emotion_trend(emotion_history: list[float]) -> dict:
-    """
-    Checks if sadness/hopelessness scores have been increasing over last 3 turns.
-    `emotion_history` = list of sadness scores, most recent last.
-    Returns trend information for dashboard monitoring.
-    """
-    if len(emotion_history) < 3:
-        return {"trending_down": False, "severity": "low"}
-
-    recent = emotion_history[-3:]
-    is_worsening = recent[0] < recent[1] < recent[2]
-    avg = sum(recent) / len(recent)
-
-    severity = "high" if avg > 0.7 else "medium" if avg > 0.45 else "low"
-
-    return {
-        "trending_down": is_worsening,
-        "severity": severity,
-        "recent_scores": recent,
-        "average": round(avg, 3),
-    }
+        
+        content = response.choices[0].message.content
+        result = json.loads(content)
+        
+        if result.get("is_crisis"):
+            logger.warning(f"[SAFETY] Consensus Synthesizer identified active crisis! Reasoning: {result.get('reasoning')}")
+        
+        logger.info("Consensus synthesized successfully")
+        return {
+            "llm_sentiment": result.get("llm_sentiment", "unknown"),
+            "category": result.get("category", "general"),
+            "is_crisis": result.get("is_crisis", False),
+            "reasoning": result.get("reasoning", "")
+        }
+            
+    except Exception as e:
+        logger.error(f"Consensus Synthesizer failed: {e}")
+        # Default fail-safe
+        return {
+            "llm_sentiment": "unknown",
+            "category": "technical error",
+            "is_crisis": False,
+            "reasoning": "Fallback due to API error."
+        }

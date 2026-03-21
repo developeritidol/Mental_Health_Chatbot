@@ -28,6 +28,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
     Accepts an audio blob from the browser (MediaRecorder output, typically webm/ogg).
     Sends it to Groq's Whisper large-v3 model and returns the transcript.
     """
+    logger.info(f"Receiving audio file for transcription: {file.filename}")
     if file.content_type and file.content_type not in ALLOWED_MIME:
         logger.warning(f"Unsupported audio type: {file.content_type}")
 
@@ -51,6 +52,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
         duration = getattr(transcription, "duration", None)
 
         logger.debug(f"Whisper transcript: '{text[:60]}...' lang={language}")
+        logger.info("Transcription successful")
 
         return TranscriptionResponse(text=text, language=language, duration=duration)
 

@@ -17,7 +17,6 @@ from functools import lru_cache
 from typing import Optional
 
 from app.core.config import get_settings
-from app.core.constants import EMOTION_MODE_MAP, RESPONSE_MODE_INSTRUCTIONS, CRISIS_SIGNAL_PHRASES
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -56,22 +55,14 @@ class EmotionResult:
         self,
         dominant: str,
         scores: dict[str, float],
-        mode: str,
-        mode_instruction: str,
-        is_crisis_signal: bool,
     ):
         self.dominant = dominant
         self.scores = scores
-        self.mode = mode
-        self.mode_instruction = mode_instruction
-        self.is_crisis_signal = is_crisis_signal
 
     def to_dict(self) -> dict:
         return {
             "dominant_emotion": self.dominant,
             "top_scores": self.scores,
-            "response_mode": self.mode,
-            "is_crisis_signal": self.is_crisis_signal,
         }
 
 
@@ -86,6 +77,7 @@ async def analyse(text: str, context_window: Optional[str] = None) -> EmotionRes
 
     Falls back to neutral if the model is unavailable.
     """
+    logger.info(f"Starting emotion analysis for text: '{text[:50]}...'")
     # For very short messages, prepend context so the model has enough signal
     inference_text = text
     if context_window and len(text.split()) <= 6:
@@ -99,14 +91,10 @@ async def analyse(text: str, context_window: Optional[str] = None) -> EmotionRes
 
 
 def _run_inference(text: str, original_text: Optional[str] = None) -> EmotionResult:
-    # ── Crisis keyword check — always on the raw user message, not the context window ──
-    check_text = (original_text or text).lower()
-    crisis_signal = any(phrase in check_text for phrase in CRISIS_SIGNAL_PHRASES)
-
     # ── Model inference ───────────────────────────────────────────────────────
     pipe = _load_pipeline()
     if pipe is None:
-        return _fallback(crisis_signal)
+        return _fallback()
 
     try:
         raw = pipe(text)
@@ -116,31 +104,21 @@ def _run_inference(text: str, original_text: Optional[str] = None) -> EmotionRes
         dominant = max(scores, key=scores.get)
     except Exception as e:
         logger.warning(f"Emotion inference error: {e}")
-        return _fallback(crisis_signal)
+        return _fallback()
 
-    # ── Map to response mode ──────────────────────────────────────────────────
-    mode = EMOTION_MODE_MAP.get(dominant, "curious_exploration")
-    instruction = RESPONSE_MODE_INSTRUCTIONS.get(mode, "")
-
-    logger.debug(f"Emotion: {dominant} ({scores.get(dominant):.3f}) → mode={mode}")
+    logger.info(f"Emotion Analysis — Dominant: {dominant} ({scores.get(dominant):.2f})")
 
     return EmotionResult(
         dominant=dominant,
         scores=scores,
-        mode=mode,
-        mode_instruction=instruction,
-        is_crisis_signal=crisis_signal,
     )
 
 
-def _fallback(crisis_signal: bool) -> EmotionResult:
-    mode = "gentle_watchful_presence" if crisis_signal else "curious_exploration"
+def _fallback() -> EmotionResult:
+    logger.info("Emotion analysis fallback triggered")
     return EmotionResult(
         dominant="neutral",
         scores={"neutral": 1.0},
-        mode=mode,
-        mode_instruction=RESPONSE_MODE_INSTRUCTIONS[mode],
-        is_crisis_signal=crisis_signal,
     )
 
 

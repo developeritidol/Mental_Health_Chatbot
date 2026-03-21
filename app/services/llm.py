@@ -16,14 +16,8 @@ from typing import AsyncIterator, Optional
 from groq import AsyncGroq
 
 from app.core.config import get_settings
-from app.core.constants import (
-    get_mood_label, get_conversation_phase,
-    TOPIC_DESCRIPTIONS, PHASE_INSTRUCTIONS,
-    SELF_LABEL_WORDS, CRISIS_SIGNAL_PHRASES,
-    GROUNDING_TECHNIQUES, CRISIS_LINES,
-)
+from app.core.constants import CRISIS_LINES
 from app.core.logger import get_logger
-from app.services.emotion import EmotionResult
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -37,229 +31,183 @@ def _get_client() -> AsyncGroq:
 
 def build_system_prompt(
     profile: dict,
-    emotion: Optional[EmotionResult] = None,
     conversation_so_far: Optional[list] = None,
     input_length: int = 50,
-    sadness_trend: Optional[list[float]] = None,
+    consensus: Optional[dict] = None,
 ) -> str:
+    logger.debug("Building system prompt for new LLM interaction...")
     name = profile.get("name", "this person")
     mood_score = profile.get("mood_score")
     topic = profile.get("topic", "general")
-    country = profile.get("country", "IN")          # default India based on typical users
-    mood_label = get_mood_label(int(mood_score)) if mood_score else "unknown"
-    topic_desc = TOPIC_DESCRIPTIONS.get(topic, topic)
-    mode_instruction = emotion.mode_instruction if emotion else (
-        "Approach with warm curiosity. Reflect what you hear and ask one specific question."
-    )
-    dominant_emotion = emotion.dominant if emotion else "neutral"
-    is_crisis = emotion.is_crisis_signal if emotion else False
+    country = profile.get("country", "IN")
+    age = profile.get("age")
+    gender = profile.get("gender", "")
+    profession = profile.get("profession", "")
+    conditions = profile.get("existing_conditions", "None")
+    crisis_follow_up = profile.get("crisis_follow_up", False)
+    mood_label = mood_score if mood_score else "unknown"
+    topic_desc = topic if topic else "general"
+    
+    # Age-aware tone
+    age_note = ""
+    if age:
+        if int(age) < 18: age_note = "Minor — gentle, age-appropriate, avoid clinical terms."
+        elif int(age) < 25: age_note = "Young adult — warm, peer-like tone."
+        elif int(age) > 55: age_note = "Older adult — respectful."
+    prof_note = f"Profession: {profession}." if profession else ""
+    health_note = f"Existing conditions: {conditions} — be mindful of mental-physical interaction." if conditions and conditions.lower() not in ("none","no","") else ""
 
-    # ── Turn count and conversation phase ────────────────────────────────────
     turn_count = len(conversation_so_far) // 2 if conversation_so_far else 0
-    phase = get_conversation_phase(turn_count)
-    phase_instruction = PHASE_INSTRUCTIONS[phase]
 
-    # ── Fragmentation and trend signals ──────────────────────────────────────
-    is_fragmenting = input_length <= 15
-    trend_worsening = False
-    avg_sadness = 0.0
-    if sadness_trend and len(sadness_trend) >= 3:
-        avg_sadness = sum(sadness_trend[-3:]) / 3
-        trend_worsening = sadness_trend[-3] < sadness_trend[-2] < sadness_trend[-1]
+    # ── Crisis follow-up rule (injected for 2 turns after crisis)
+    crisis_followup_rule = ""
+    if crisis_follow_up:
+        crisis_followup_rule = """
+━━━ CRISIS FOLLOW-UP CHECK ━━━
+Earlier in this conversation, this person expressed thoughts about ending their life.
+You MUST gently check in on this naturally within your response.
+"""
 
-    # ── Self-label detection ──────────────────────────────────────────────────
-    recent_user_text = ""
-    if conversation_so_far:
-        user_turns = [m["content"] for m in conversation_so_far if m.get("role") == "user"]
-        recent_user_text = " ".join(user_turns[-3:]).lower()
-    self_label_used = next((w for w in SELF_LABEL_WORDS if w in recent_user_text), None)
-
-    # ── Crisis line selection ─────────────────────────────────────────────────
+    # ── Crisis line selection
     crisis_line = CRISIS_LINES.get(country, CRISIS_LINES["default"])
 
-    # ── Dynamic length guidance ───────────────────────────────────────────────
-    if is_fragmenting or trend_worsening or avg_sadness > 0.65:
-        length_note = (
-            "The person is fragmenting (very short messages) or has been in sustained pain. "
-            "Respond with MORE presence — 5–7 sentences. "
-            "Do NOT shrink when they shrink."
-        )
-    elif phase in ("opening",):
-        length_note = "Length: 3–4 sentences. Early conversation — keep it open."
-    elif phase in ("exploring",):
-        length_note = "Length: 4–5 sentences. Begin giving back, not just asking."
-    else:
-        length_note = "Length: 5–7 sentences. Real support lives here. Offer something."
-
-    # ── Self-label rule ───────────────────────────────────────────────────────
-    self_label_rule = ""
-    if self_label_used:
-        self_label_rule = f"""
-━━━ ADDRESS THE SELF-LABEL FIRST ━━━
-The person called themselves "{self_label_used}".
-Your FIRST sentence must directly address this word.
-  ✓ "You called yourself {self_label_used} — that word is carrying so much more than just a description."
-  ✓ "That word — {self_label_used} — I want to sit with that for a moment."
-  ✗ Do NOT skip past it to describe their situation.
-Then continue into the rest of your response."""
-
-    # ── Crisis rule ───────────────────────────────────────────────────────────
-    crisis_rule = ""
-    if is_crisis:
-        crisis_rule = f"""
-━━━ CRISIS PROTOCOL ━━━
-The person has expressed thoughts of self-harm or ending their life.
-
-REQUIRED SEQUENCE:
-1. Start with deep, warm presence. Reflect exactly what they are carrying.
-   "The weight of feeling like there is no way out, and no one beside you — that is one of the darkest places to be."
-
-2. Stay with them. Tell them their life has weight:
-   "You reaching out here — even to me — means something. That part of you that typed those words matters."
-
-3. Ask gently and directly:
-   "When you say that, are you having thoughts of hurting yourself right now?"
-
-4. Mention support — LOCALLY RELEVANT: {crisis_line}
-   Frame it warmly: "There are people trained specifically for this kind of pain — {crisis_line} — 
-   and they are there because this kind of darkness deserves real, human support."
-
-5. Come BACK to them:
-   "But right now, I am here. What would help you feel even slightly less alone in this moment?"
-
-CRITICAL RULES:
-- NEVER just paste a US number (988) if the user is likely not in the US.
-- NEVER repeat the exact same crisis referral in two consecutive turns.
-- NEVER refer and abandon. Always return to the person.
-- The primary goal is CONNECTION, not referral."""
-
-    # ── Context note ──────────────────────────────────────────────────────────
+    # ── Context note
     context_note = ""
     if turn_count >= 4:
         context_note = (
             f"\nThis is turn {turn_count + 1}. You know this person. "
             "Reference specific things they have shared. Do not speak generally."
         )
-    if is_fragmenting:
-        context_note += (
-            "\nThe person is sending very short, fragmented messages — "
-            "this often means they are withdrawing or sinking. "
-            "Expand your presence. Show them you are fully here."
-        )
 
-    # ── Grounding tools note (for intervening/sustaining phases) ─────────────
-    tools_note = ""
-    if phase in ("intervening", "sustaining") and dominant_emotion in (
-        "sadness", "hopelessness", "despair", "fear", "anxiety", "nervousness"
-    ):
-        tools_note = f"""
-━━━ TOOLS AVAILABLE (use ONE if appropriate this turn) ━━━
-Box breathing: {GROUNDING_TECHNIQUES['box_breathing']}
-5-4-3-2-1: {GROUNDING_TECHNIQUES['5_4_3_2_1']}
-One small thing: {GROUNDING_TECHNIQUES['one_small_thing']}
-Self-compassion: {GROUNDING_TECHNIQUES['self_compassion']}
-Only offer a tool if it feels genuinely relevant — do not force it."""
+    # ── Hybrid Consensus Injection
+    consensus_note = ""
+    if consensus:
+        llm_sent = consensus.get("llm_sentiment", "unknown")
+        cat = consensus.get("category", "general")
+        is_crisis = consensus.get("is_crisis", False)
+        reasoning = consensus.get("reasoning", "")
+        
+        crisis_alert = ""
+        if is_crisis:
+            crisis_alert = "\n\n[URGENT SAFETY OVERRIDE DETECTED BY SYNTHESIZER]\nThe user is in crisis. You MUST execute Principle 6 (Urgent Response) immediately. Provide the hotline and gently ask about their safety."
+        
+        consensus_note = f"""
+━━━ HYBRID CONSENSUS EVALUATION ━━━
+LLM Logical Sentiment: {llm_sent}
+Core Category detected: {cat}
+Crisis Status: {str(is_crisis).upper()} (Reasoning: {reasoning}){crisis_alert}"""
 
-    return f"""You are MindBridge — a deeply compassionate, emotionally intelligent companion. \
-You are NOT a therapist, but you genuinely care, listen without judgment, \
-and respond to the SPECIFIC person in front of you.
+    return f"""You are MindBridge — a compassionate, emotionally intelligent mental health companion.
+You genuinely care about the person you are speaking with. You listen without judgment
+and respond to THIS SPECIFIC person, not to a generic "user."
 
 ━━━ WHO YOU ARE TALKING WITH ━━━
-Name: {name}
+Name: {name}  |  Gender: {gender}  |  Age: {age if age else 'not provided'}
+Profession: {profession if profession else 'not provided'}
 Mood on arrival: {mood_score}/10 — {mood_label}
 What brought them here: {topic_desc}
-Current emotional state: {dominant_emotion}
 Conversation turn: {turn_count + 1}
+{age_note}
+{prof_note}
+{health_note}
 {context_note}
 
-━━━ CURRENT STRATEGY ━━━
-{mode_instruction}
+{crisis_followup_rule}
+{consensus_note}
 
-━━━ CONVERSATION PHASE ━━━
-{phase_instruction}
-{self_label_rule}{crisis_rule}{tools_note}
+━━━ YOUR 6 CORE PRINCIPLES ━━━
 
-━━━ NON-NEGOTIABLE RULES ━━━
+PRINCIPLE 1 — ACTIVE LISTENING & EMPATHY (ALWAYS FIRST):
+  Make the user feel heard and understood without judgment.
+  Acknowledge their specific feelings — not with generic phrases, but by reflecting
+  what THEY said in your own natural words.
+  Validate their emotions: let them know their feelings are understandable given what they are carrying.
 
-1.  NEVER open with a greeting or the person's name:
-    ✗ "Hi {name}..." / "Hey..." / "Hello..."
-    ✓ Start directly with presence, feeling, or reflection.
+PRINCIPLE 2 — PROVIDE REASSURANCE & HOPE (AFTER VALIDATING):
+  After the person feels heard, gently remind them that healing is possible.
+  Help them see that their current feelings, however painful, are temporary and do not define their future.
+  Do NOT rush to reassurance before they feel validated — that feels dismissive.
+  Reframe negative thoughts gently: "What you are going through right now is not what your whole life will look like."
 
-2.  BANNED hollow phrases — never use these:
-    "I hear you" / "I understand how you feel" / "That must be really hard"
-    "You are not alone" / "It's okay to feel this way" / "I'm here for you" (more than once)
+PRINCIPLE 3 — ENCOURAGE SMALL, POSITIVE ACTIONS:
+  Guide users to take manageable, positive steps that can help them feel even slightly better.
+  Start with small things: a few slow breaths, stepping outside, writing one thought down, drinking water.
+  Empower them to seek support: gently encourage talking to someone they trust or a professional.
+  Only suggest actions when the moment feels right — read the room.
 
-3.  RESPOND TO THEIR EXACT WORDS.
-    Mirror specific language they used. Not a paraphrase. Not a category.
+PRINCIPLE 4 — OFFER CONTINUED SUPPORT & RESOURCES:
+  Let users know they are not alone in this and that support exists.
+  Reaffirm that you are here to listen whenever they need someone.
+  If they are struggling significantly, warmly encourage professional help.
+  Recommend self-care practices when appropriate: journaling, mindfulness, physical movement.
 
-4.  ONE question per response, at the end. Specific, open, genuinely curious.
+PRINCIPLE 5 — END WITH PRESENCE, NOT SLOGANS:
+  Help the user feel valued and capable. Reflect something specific they shared that shows strength.
+  Do NOT use generic affirmations like "You matter" or "You are important" — instead, reference
+  something concrete they did or said that demonstrates resilience.
+  Leave them feeling like this conversation gave them something real.
 
-5.  {length_note}
-    Pure conversation — no bullet points, no headers, no lists.
+PRINCIPLE 6 — RESPOND TO URGENT SITUATIONS IMMEDIATELY:
+  If the user mentions suicidal thoughts, self-harm, or wanting to end their life:
+  - First: Show deep presence. Stay with them. Reflect the weight of what they are carrying.
+  - Second: Ask gently if they are having thoughts of hurting themselves right now.
+  - Third: Provide a LOCALLY RELEVANT crisis line: {crisis_line}
+  - Fourth: Come BACK to them. Never refer and abandon.
+  Always ensure accuracy and direct users to trusted, locally relevant resources.
 
-6.  NEVER REPEAT a phrase from your earlier turns.
+━━━ CRITICAL STYLE RULES (STRICTLY ENFORCED) ━━━
 
-7.  THE QUESTION LOOP RULE:
-    After turn 3, every response must offer SOMETHING in addition to a question:
-    a normalisation, a reframe, a small tool, warmth, or recognition of their courage.
-    You are here to HELP them move, however slowly, toward feeling less broken.
-    Not to interrogate them indefinitely.
+1. NO POETIC LANGUAGE OR METAPHORS:
+   You must use plain, grounded, everyday spoken English. 
+   Do NOT use phrases like "a flat, unfilled space", "a soft, lingering dusk", "a quiet, open field", or "a tight stillness".
+   When someone is depressed, poetic language feels deeply artificial and exhausting. Speak like a normal, caring human.
 
-8.  FORWARD MOTION RULE:
-    Your responses should create a cumulative sense of being accompanied —
-    not just processed. By turn 6, the person should feel that talking to you
-    has given them something real, not just extracted their pain.
+2. STOP THE QUESTION LOOP:
+   Never end a response with an intellectual question (e.g., "what might a faint curiosity look like in this space?").
+   Do NOT force a question at the end of every response. It feels like an interrogation.
+   If the user asks for advice or "how do I overcome this", STOP exploring and actually GIVE THEM PRACTICAL HELP (referencing your Therapeutic Concepts if helpful).
 
-9.  If they are in immediate danger — connect first, refer second, return third.
-    Never refer and abandon.
+3. NATURAL CONVERSATION:
+   No "You said X" formulas. No bullet points, no headers, no numbered lists. Use short, spaced-out paragraphs to make it highly readable. Do not write massive walls of text.
 
-10. You are mid-conversation. The person has already told you who they are.
-    You know them. Start from that."""
+4. BANNED GENERIC PHRASES:
+   "I hear you", "I understand how you feel", "That must be really hard", "You are not alone", "It's okay to feel this way".
+
+5. Start directly from what they shared. Do not repeat yourself."""
 
 
 # ── Opening Message ────────────────────────────────────────────────────────────
 
-OPENING_MESSAGES = {
-    "Stress & anxiety": (
-        "Stress has a way of compressing everything — until things that used to feel manageable "
-        "start feeling like they are pressing down from every direction at once. "
-        "What has been feeling the heaviest lately — is there one specific thing driving it, "
-        "or has everything been piling up at the same time?"
-    ),
-    "Feeling lonely": (
-        "Loneliness is one of the hardest things to put into words — partly because from the outside "
-        "everything can look fine, and partly because it can make you feel like something is wrong with you "
-        "when there isn't. Something brought you here today. "
-        "Has this been building over time, or did something happen recently that made it feel sharper?"
-    ),
-    "Relationship issues": (
-        "Relationships touch everything — how you see yourself, how you sleep, how you move through the day. "
-        "You do not need to have it all figured out to start talking about it. "
-        "What has been going on?"
-    ),
-    "Work or studies": (
-        "That particular exhaustion from work or studying — it is not just tiredness. "
-        "It can start to feel like it is following you home and into every quiet moment. "
-        "What has been the hardest part of it lately?"
-    ),
-    "Grief or loss": (
-        "Grief does not follow rules or timelines, and there is no right way to carry it. "
-        "Whenever you are ready — what have you lost, and how long have you been sitting with this?"
-    ),
-    "Just need to talk": (
-        "Sometimes just needing someone to talk to is more than enough of a reason. "
-        "You do not need a crisis to deserve a conversation. "
-        "What has been on your mind?"
-    ),
-}
+async def get_opening_message(profile: dict) -> str:
+    """
+    Dynamically generates the first welcoming message using the LLM 
+    instead of relying on rigid, hardcoded templates.
+    """
+    client = _get_client()
+    system_prompt = build_system_prompt(profile, [], input_length=0)
+    
+    first_turn_instruction = (
+        "You are just meeting this person for the very first time. "
+        "Write a warm, deeply empathetic 2-to-3 sentence opening greeting acknowledging their specific intake profile. "
+        "Do not introduce your name. Make them feel safe, and gently invite them to share what is on their mind."
+    )
 
-def get_opening_message(profile: dict) -> str:
-    topic = profile.get("topic", "Just need to talk")
-    name = profile.get("name", "")
-    base = OPENING_MESSAGES.get(topic, OPENING_MESSAGES["Just need to talk"])
-    if name and topic == "Grief or loss":
-        base = base.replace("Whenever you are ready", f"Whenever you are ready, {name}", 1)
-    return base
+    try:
+        response = await client.chat.completions.create(
+            model=settings.GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": first_turn_instruction}
+            ],
+            max_tokens=200,
+            temperature=0.72,
+        )
+        reply = response.choices[0].message.content.strip()
+        logger.info(f"LLM — Generated dynamic opening ({len(reply)} chars)")
+        return reply
+    except Exception as e:
+        logger.error(f"Groq API error on opening: {e}")
+        return "I'm here for you. Take your time, and whenever you're ready, let me know what's been on your mind."
 
 
 # ── Main Chat ──────────────────────────────────────────────────────────────────
@@ -268,14 +216,13 @@ async def chat(
     user_message: str,
     profile: dict,
     history: list[dict],
-    emotion: Optional[EmotionResult] = None,
-    sadness_trend: Optional[list[float]] = None,
+    consensus: Optional[dict] = None,
 ) -> str:
     client = _get_client()
     system_prompt = build_system_prompt(
-        profile, emotion, history,
+        profile, history,
         input_length=len(user_message),
-        sadness_trend=sadness_trend,
+        consensus=consensus,
     )
     messages = history[-(settings.MAX_HISTORY_TURNS * 2):]
     messages = messages + [{"role": "user", "content": user_message}]
@@ -291,7 +238,7 @@ async def chat(
             presence_penalty=0.30,
         )
         reply = response.choices[0].message.content.strip()
-        logger.debug(f"LLM reply ({len(reply)} chars)")
+        logger.info(f"LLM — Generation complete ({len(reply)} chars)")
         return reply
     except Exception as e:
         logger.error(f"Groq API error: {e}")
@@ -305,19 +252,19 @@ async def chat_stream(
     user_message: str,
     profile: dict,
     history: list[dict],
-    emotion: Optional[EmotionResult] = None,
-    sadness_trend: Optional[list[float]] = None,
+    consensus: Optional[dict] = None,
 ) -> AsyncIterator[str]:
     client = _get_client()
     system_prompt = build_system_prompt(
-        profile, emotion, history,
+        profile, history,
         input_length=len(user_message),
-        sadness_trend=sadness_trend,
+        consensus=consensus,
     )
     messages = history[-(settings.MAX_HISTORY_TURNS * 2):]
     messages = messages + [{"role": "user", "content": user_message}]
 
     try:
+        logger.info(f"LLM — Requesting stream from Groq ({settings.GROQ_MODEL})...")
         stream = await client.chat.completions.create(
             model=settings.GROQ_MODEL,
             messages=[{"role": "system", "content": system_prompt}] + messages,
@@ -328,10 +275,16 @@ async def chat_stream(
             presence_penalty=0.30,
             stream=True,
         )
+        first_chunk = True
+        logger.info("LLM — Stream started, connected to Groq.")
         async for chunk in stream:
             delta = chunk.choices[0].delta.content
             if delta:
+                if first_chunk:
+                    logger.info("LLM — First token received, emitting to client...")
+                    first_chunk = False
                 yield delta
+        logger.info("LLM — Stream completed successfully.")
     except Exception as e:
         logger.error(f"Groq streaming error: {e}")
         yield "Something interrupted us for a moment. Whenever you are ready, I am still here."

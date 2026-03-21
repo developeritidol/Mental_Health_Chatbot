@@ -1,5 +1,8 @@
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class Settings(BaseSettings):
@@ -22,7 +25,7 @@ class Settings(BaseSettings):
 
     # Session
     MAX_HISTORY_TURNS: int = 20   # last N turns kept in memory
-    MAX_TOKENS: int = 900
+    MAX_TOKENS: int = 2000
 
     class Config:
         env_file = ".env"
@@ -32,4 +35,5 @@ class Settings(BaseSettings):
 
 @lru_cache()
 def get_settings() -> Settings:
+    logger.debug("Loading application settings")
     return Settings()

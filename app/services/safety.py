@@ -32,9 +32,9 @@ settings = get_settings()
 # Crisis always overrides — see _apply_crisis_override() below.
 
 MESSAGE_CLASS_BUDGETS: dict[str, int] = {
-    "gratitude":         60,    # "thanks", "feel better" — 1-2 sentences only
-    "short_casual":      80,    # ≤5 words, no emotional content
-    "first_disclosure":  120,   # first emotional disclosure — 3 sentences max
+    "gratitude":         80,    # raised from 60 — 60 caused model to ignore class rule entirely
+    "short_casual":      90,    # ≤5 words, no emotional content
+    "first_disclosure":  180,   # raised from 160 — model still cutting off at 160
     "positive_update":   100,   # "i tried it", "it worked" — celebrate briefly
     "advice_request":    180,   # asking for guidance — 1 suggestion only
     "emotional_ongoing": 150,   # mid-conversation — reflect + 1 question only
@@ -133,9 +133,16 @@ MESSAGE CLASS RULES — read every rule before classifying:
   → token_budget: 100
 
 "first_disclosure"
-  → Turn 0–2 AND user is sharing an emotional problem for the first time.
+  → Turn 0–2 AND user is sharing an emotional problem, life event, or difficult situation for the first time.
   → Current turn is: {turn_count}
-  → Examples: "i feel lonely and no one likes me", "i've been struggling a lot lately"
+  → ⚠️ CRITICAL: Statements about life events ARE first_disclosure, NOT advice_request.
+     "I lost the job" = first_disclosure ✓ (sharing a painful event, NOT asking for advice)
+     "I lost my job, what should I do?" = advice_request ✓ (explicitly asking)
+     "my relationship ended" = first_disclosure ✓
+     "I failed my exam" = first_disclosure ✓
+     "I feel lonely" = first_disclosure ✓
+  → The test: is the user SHARING something that just happened or how they feel?
+    If yes → first_disclosure. They are not asking for help yet. They are telling you what happened.
   → token_budget: 150
 
 "positive_update"
@@ -146,15 +153,17 @@ MESSAGE CLASS RULES — read every rule before classifying:
   → token_budget: 130
 
 "advice_request"
-  → User is explicitly and clearly asking for guidance or a how-to.
-  → ⚠️ CRITICAL: Only classify as advice_request if the request is UNAMBIGUOUS.
-     "how can I make friends" = advice_request ✓
+  → User is EXPLICITLY and clearly asking for guidance, how-to, or what to do.
+  → ⚠️ CRITICAL: Only classify as advice_request if the user uses a QUESTION or explicit request.
+     "how can I make friends" = advice_request ✓ (question)
+     "what should I do about my job" = advice_request ✓ (question + "what should")
+     "I lost the job" = first_disclosure ✗ NOT advice_request (statement, not question)
      "I don't know how I can go on like this" = emotional_ongoing ✗ (NOT advice_request)
-     "what should I do about my job" = advice_request ✓
      "I don't know what to do anymore" = emotional_ongoing ✗ (NOT advice_request)
-  → The test: is the user asking for a practical solution to a defined problem?
-    If yes → advice_request. If they are expressing despair/confusion → emotional_ongoing.
-  → token_budget: 220
+  → The ONLY test: does the message contain a question mark OR the words "should I", "how do I",
+    "what should", "how can I", "give me advice", "what do I do"?
+    If NO question or explicit request → it is NOT advice_request. Use first_disclosure or emotional_ongoing.
+  → token_budget: 180
 
 "emotional_ongoing"
   → Default class for any message that is emotional in nature and doesn't fit above.

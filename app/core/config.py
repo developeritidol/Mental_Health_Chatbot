@@ -28,9 +28,9 @@ class Settings(BaseSettings):
 
     # ── Groq — Main Generator ─────────────────────────────────────────────────
     GROQ_API_KEY: str  = ""
-    GROQ_MODEL:   str  = "openai/gpt-oss-120b"   # Primary generator (highest quality on Groq)
+    # GROQ_MODEL:   str  = "openai/gpt-oss-120b"   # Primary generator (highest quality on Groq)
     # Fallback if 120B is unavailable or too slow:
-    # GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
 
     # ── Groq — Synthesizer (Llama-8B — fast, cheap, JSON output) ─────────────
     SYNTHESIZER_MODEL: str = "llama-3.1-8b-instant"

@@ -1,24 +1,22 @@
 """
-LLM Service — Groq Generator v3
-─────────────────────────────────
-Handles:
-  • System prompt construction from consensus + profile + history
-  • Dynamic token budget from consensus (set by 8B synthesizer, not string matching)
-  • Therapeutic arc: opening → listening → exploring → intervening → sustaining
-  • Crisis handling with locally-relevant resources
-  • Conversation history management
-  • Groq API call (streaming + non-streaming)
-
-v3 changes (all brittle logic removed):
-  • _classify_message() DELETED — message_class and token_budget now come
-    exclusively from consensus dict produced by safety.py synthesizer.
-    This eliminates the "goodbye" → gratitude and "how can I go on" →
-    advice_request misclassification bugs.
-  • build_system_prompt() now returns (prompt_str, token_budget: int).
-    token_budget is read from consensus["token_budget"] — Python never
-    independently calculates it.
-  • Age parsing uses safe_int() helper — no more ValueError on "twenty" or "25 yrs".
-  • Crisis token floor enforced here as a second safety check (defence in depth).
+LLM Service — Groq Generator v4 (Final)
+─────────────────────────────────────────
+v4 improvements over v3:
+  • response_rules moved to position 2 in prompt (before profile, before principles)
+    LLM weights the beginning of context more heavily. Length constraint must be first.
+  • Conversation memory: bot's last 3 response openings extracted from history
+    and injected as banned phrases. Bot never starts the same way twice.
+  • Emotion arc: user's last 6 messages summarized and shown to model so it
+    understands the emotional journey, not just this single message.
+  • Personalization deepens with turn count: grows from basic profile awareness
+    to referencing specific things the user shared earlier in the conversation.
+  • Principles condensed from 6+8 rules to 4 principles + 6 hard rules.
+    Fewer, clearer instructions produce higher compliance rate.
+  • RULE 3 added: banned cliché advice (deep breaths, water, walks, journaling).
+  • Crisis alert moved to TOP of consensus block with visual separator.
+  • _SENTENCE_BUDGETS use EXACTLY commands, not MAXIMUM suggestions.
+  • Default token budget tightened from 200 to 150.
+  • presence_penalty raised to 0.55 to further discourage repetition.
 """
 
 from __future__ import annotations
@@ -33,8 +31,6 @@ from app.core.logger import get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
-# Second line of defence — even if safety.py fallback is wrong,
-# a crisis response will never be cut below this.
 CRISIS_TOKEN_FLOOR = 400
 
 
@@ -45,11 +41,7 @@ def _get_client() -> AsyncGroq:
 # ── Safe age parser ───────────────────────────────────────────────────────────
 
 def _safe_int(value, default: int = 0) -> int:
-    """
-    Safely converts any age input to int.
-    Handles: "25", "25 yrs", "twenty", None, "", 25.
-    Returns default (0) on any failure — caller treats 0 as 'age not provided'.
-    """
+    """Safely converts any age input to int. Never raises ValueError."""
     if value is None:
         return default
     try:
@@ -58,50 +50,160 @@ def _safe_int(value, default: int = 0) -> int:
         return default
 
 
-# ── Sentence budget lookup ────────────────────────────────────────────────────
-# Translates message_class from consensus into human-readable instructions
-# that go inside the system prompt. The LLM reads these as its writing rules.
+# ── Sentence budgets ──────────────────────────────────────────────────────────
+# Critical: "EXACTLY N" not "N MAXIMUM"
+# Commands produce compliance. Suggestions produce suggestions.
 
 _SENTENCE_BUDGETS: dict[str, str] = {
     "gratitude": (
-        "1 sentence MAXIMUM.\n"
-        "Acknowledge the win specifically. End naturally. No advice."
+        "Write EXACTLY 1 sentence. No more.\n"
+        "Name what they did or what changed. End naturally.\n"
+        "STOP after 1 sentence. Do not write a second."
     ),
     "short_casual": (
-        "1–2 sentences MAXIMUM.\n"
-        "Warm acknowledgment. One gentle open question if natural. Nothing more."
+        "Write EXACTLY 2 sentences. Count them. Stop at 2.\n"
+        "Sentence 1: Warm acknowledgment.\n"
+        "Sentence 2: One gentle open question if natural. Otherwise just 1 sentence.\n"
+        "Do NOT write a 3rd sentence."
     ),
     "first_disclosure": (
-        "2 sentences MAXIMUM — STRICT LIMIT:\n"
-        "  Sentence 1: Validate and reflect their specific situation in your own words.\n"
-        "  Sentence 2: Ask ONE specific question to understand better.\n"
-        "DO NOT give advice. DO NOT reassure. Just listen and ask."
+        "Write EXACTLY 3 sentences. Count each one. Stop at 3.\n"
+        "Sentence 1: Reflect their specific situation in your own words. "
+        "Not generic. Rephrase what they said to show you heard the meaning.\n"
+        "Sentence 2: One sentence on why this feeling makes sense for their situation.\n"
+        "Sentence 3: Ask ONE specific question. Not 'how are you feeling?' — too lazy. "
+        "Ask: 'How long has this been going on?' or 'Is this at work, home, or everywhere?' "
+        "or 'Was there a moment it started feeling this heavy?'\n"
+        "After sentence 3: STOP. No advice. No reassurance. No closing. Just stop."
     ),
     "positive_update": (
-        "2 sentences MAXIMUM:\n"
-        "  Sentence 1: Celebrate the specific action they took.\n"
-        "  Sentence 2: One natural next step IF it flows. Otherwise end warmly.\n"
-        "DO NOT recap the whole conversation."
+        "Write EXACTLY 2 sentences. Count them. Stop at 2.\n"
+        "Sentence 1: Celebrate the SPECIFIC action they took — name exactly what they did.\n"
+        "Sentence 2: One brief natural observation. If a forward step feels natural, include it.\n"
+        "After sentence 2: STOP. No recap. No more advice. Just stop."
     ),
     "advice_request": (
-        "3 sentences MAXIMUM:\n"
-        "  Sentence 1: Briefly acknowledge the situation.\n"
-        "  Sentence 2: Give ONE specific, highly practical suggestion. No lists.\n"
-        "  Sentence 3: ONE small immediate action.\n"
-        "NO CLICHÉS: Do not suggest deep breaths, walks, or drinking water."
+        "Write EXACTLY 3 sentences. Count them. Stop at 3.\n"
+        "Sentence 1: Briefly acknowledge the situation — 1 sentence only.\n"
+        "Sentence 2: Give ONE specific, practical suggestion. Not a list. "
+        "ONE idea, explained well. Make it specific to THIS person's situation.\n"
+        "Sentence 3: ONE small immediate action they can try in the next hour.\n"
+        "After sentence 3: STOP. No lists. No alternatives. Just stop."
     ),
     "emotional_ongoing": (
-        "2 sentences MAXIMUM — STRICT LIMIT:\n"
-        "  Sentence 1: Reflect the exact thing they just said.\n"
-        "  Sentence 2: ONE grounded observation OR ONE probing question.\n"
-        "DO NOT do both. DO NOT offer advice unless they explicitly asked."
+        "Write EXACTLY 2 sentences. Count them. Stop at 2.\n"
+        "Sentence 1: Reflect the specific thing they just said — not generically, specifically.\n"
+        "Sentence 2: EITHER ask ONE focused question about their situation "
+        "OR offer ONE grounded observation. Pick one. Not both.\n"
+        "After sentence 2: STOP. No advice unless they asked for it. Just stop."
     ),
     "crisis": (
-        "This is a crisis response. Length rules are suspended.\n"
+        "LENGTH RULES ARE SUSPENDED FOR THIS RESPONSE.\n"
         "Write as long as the moment requires.\n"
-        "You MUST complete all four steps of Principle 6 fully."
+        "You MUST complete all 4 steps of the CRISIS PROTOCOL before ending.\n"
+        "Do not end until the person has received:\n"
+        "  1. Deep presence — you heard the weight of what they said\n"
+        "  2. A direct gentle question about their safety right now\n"
+        "  3. The crisis line woven naturally into the text\n"
+        "  4. A return to them — you are still here, what is happening right now"
     ),
 }
+
+
+# ── Conversation memory helpers ───────────────────────────────────────────────
+
+def _extract_bot_recent_openings(history: list[dict], n: int = 3) -> list[str]:
+    """
+    Extracts the first sentence of the bot's last N responses from history.
+    These are injected as banned openings so the model cannot repeat itself.
+    """
+    openings = []
+    assistant_msgs = [
+        m["content"] for m in history
+        if m.get("role") == "assistant" and m.get("content", "").strip()
+    ]
+    for msg in assistant_msgs[-n:]:
+        first_sentence = msg.strip().split(".")[0].strip()
+        if first_sentence and len(first_sentence) > 10:
+            openings.append(f'"{first_sentence}"')
+    return openings
+
+
+def _build_emotion_arc(history: list[dict]) -> str:
+    """
+    Builds a plain-English summary of the emotional arc from the user's messages.
+    Gives the model a picture of the journey, not just the current message.
+    """
+    user_msgs = [
+        m["content"].strip() for m in history
+        if m.get("role") == "user" and m.get("content", "").strip()
+    ]
+    if not user_msgs:
+        return ""
+    if len(user_msgs) == 1:
+        return f"Only 1 turn so far: {user_msgs[0][:100]}"
+
+    arc_lines = []
+    for i, msg in enumerate(user_msgs[-6:], 1):
+        arc_lines.append(f"  Turn {i}: {msg[:100]}")
+    return "\n".join(arc_lines)
+
+
+def _build_personalization_note(
+    name: str, age: int, profession: str, conditions: str,
+    topic: str, turn_count: int, history: list[dict]
+) -> str:
+    """
+    Builds personalization context that deepens with turns.
+    Turn 0: Basic profile.
+    Turn 1-2: Just started, ask don't assume.
+    Turn 3-5: Reference what they shared.
+    Turn 6+: You know them. Treat them like it.
+    """
+    if turn_count == 0:
+        parts = []
+        if profession:
+            parts.append(f"{name} is a {profession}")
+        if age > 0:
+            parts.append(f"age {age}")
+        if conditions and conditions.lower() not in ("none", "no", ""):
+            parts.append(f"living with {conditions}")
+        base = (", ".join(parts) + ".") if parts else ""
+        return f"{base} They came here about: {topic}."
+
+    if turn_count <= 2:
+        return (
+            f"You have just started talking with {name}. "
+            f"They came here about {topic}. "
+            "You do not know much yet — ask, do not assume."
+        )
+
+    user_msgs = [
+        m["content"].strip() for m in history
+        if m.get("role") == "user" and m.get("content", "").strip()
+    ]
+
+    if turn_count <= 5:
+        shared = (" | ".join(user_msgs[-3:]))[:200] if user_msgs else ""
+        return (
+            f"You know {name} somewhat now. "
+            f"In this conversation they have shared: {shared}. "
+            "Reference these specifics. Do not speak in general terms."
+        )
+
+    # Turn 6+: deep personalization
+    all_shared = (" | ".join(user_msgs[-6:]))[:300] if user_msgs else ""
+    prof_note  = f"They are a {profession}." if profession else ""
+    cond_note  = (
+        f"They live with {conditions} — be mindful of how emotions interact with this."
+        if conditions and conditions.lower() not in ("none", "no", "") else ""
+    )
+    return (
+        f"You know {name} well now. {prof_note} {cond_note} "
+        f"Everything they have shared: {all_shared}. "
+        f"Speak to their SPECIFIC situation. Reference what they told you. "
+        f"{name} should feel like you remember them, not like they are talking to a bot who resets."
+    )
 
 
 # ── System prompt builder ─────────────────────────────────────────────────────
@@ -115,78 +217,70 @@ def build_system_prompt(
     """
     Returns (system_prompt: str, token_budget: int).
 
-    token_budget is read from consensus["token_budget"] set by the 8B synthesizer.
-    If consensus is missing, falls back to emotional_ongoing budget (200).
-    Crisis token floor is enforced here as a second safety layer.
+    Prompt order (early tokens weighted more by LLM):
+      1.  Identity — who you are (3 lines max)
+      2.  RESPONSE CONSTRAINT — length rule first, always
+      3.  Anti-repetition — bot's banned recent openings
+      4.  Who you are talking with — profile
+      5.  Personalization — grows with turns
+      6.  Emotion arc — the journey so far
+      7.  Consensus — what was detected this message
+      8.  Crisis alert — URGENT, before principles
+      9.  4 Principles
+      10. 6 Hard rules
+      11. STOP instruction — last thing before generation
     """
-    name       = profile.get("name", "this person")
-    mood_score = profile.get("mood_score")
-    topic      = profile.get("topic", "general")
-    country    = profile.get("country", "IN")
-    gender     = profile.get("gender", "")
-    profession = profile.get("profession", "")
-    conditions = profile.get("existing_conditions", "None")
+    conversation_so_far = conversation_so_far or []
+
+    # ── Profile ───────────────────────────────────────────────────────────────
+    name          = profile.get("name", "this person")
+    mood_score    = profile.get("mood_score", "unknown")
+    topic         = profile.get("topic", "general wellbeing")
+    country       = profile.get("country", "IN")
+    gender        = profile.get("gender", "")
+    profession    = profile.get("profession", "")
+    conditions    = profile.get("existing_conditions", "None")
     crisis_follow_up = profile.get("crisis_follow_up", False)
+    age           = _safe_int(profile.get("age"))
+    turn_count    = len(conversation_so_far) // 2
 
-    age_raw    = profile.get("age")
-    age        = _safe_int(age_raw)   # safe conversion — no ValueError possible
-
-    turn_count = len(conversation_so_far) // 2 if conversation_so_far else 0
-
-    # ── Token budget from consensus (set by 8B, not Python string matching) ──
+    # ── Token budget ──────────────────────────────────────────────────────────
     msg_class    = "emotional_ongoing"
-    token_budget = 200
+    token_budget = 350  # Must be high enough to prevent API truncation drops
 
     if consensus:
         msg_class    = consensus.get("message_class", "emotional_ongoing")
-        token_budget = consensus.get("token_budget", 200)
-
-        # Defence-in-depth: if is_crisis is true, enforce the floor regardless
+        # Increase token budget significantly to prevent API dropping the string
+        # token_budget = max(consensus.get("token_budget", 350), 350)
+        token_budget = consensus.get("token_budget", 150)
+        
         if consensus.get("is_crisis", False):
             msg_class    = "crisis"
-            token_budget = max(token_budget, CRISIS_TOKEN_FLOOR)
+            token_budget = max(token_budget, 800)
 
     sentence_budget = _SENTENCE_BUDGETS.get(msg_class, _SENTENCE_BUDGETS["emotional_ongoing"])
 
-    # ── Age-aware tone (safe — _safe_int never throws) ────────────────────────
-    age_note = ""
+    # ── Age tone ──────────────────────────────────────────────────────────────
+    age_tone = ""
     if age > 0:
-        if age < 18:   age_note = "This person is a minor. Gentle, age-appropriate language. No clinical terms."
-        elif age < 25: age_note = "Young adult. Warm, peer-like tone. Not patronizing."
-        elif age > 55: age_note = "Older adult. Respectful, calm tone."
-
-    # ── Health note ───────────────────────────────────────────────────────────
-    health_note = ""
-    if conditions and conditions.strip().lower() not in ("none", "no", ""):
-        health_note = (
-            f"Existing conditions: {conditions}. "
-            "Be mindful of how these may interact with their emotional state."
-        )
-
-    # ── Context note (after turn 3) ───────────────────────────────────────────
-    context_note = ""
-    if turn_count >= 3:
-        context_note = (
-            f"This is turn {turn_count + 1}. You know {name} by now. "
-            "Reference specific things they have shared. "
-            "Speak to THEIR specific situation — never generically."
-        )
-
-    # ── Crisis follow-up ──────────────────────────────────────────────────────
-    crisis_followup_rule = ""
-    if crisis_follow_up:
-        crisis_followup_rule = (
-            f"\n━━━ CRISIS FOLLOW-UP ━━━\n"
-            f"Earlier in this conversation, {name} expressed thoughts about ending their life. "
-            "Check in naturally and warmly within your response — not clinically, not abruptly.\n"
-        )
+        if age < 18:
+            age_tone = "MINOR (under 18): Gentle, age-appropriate. No clinical language."
+        elif age < 25:
+            age_tone = "Young adult: Warm, peer-like. Not patronizing."
+        elif age > 60:
+            age_tone = "Older adult: Respectful, calm. No slang."
 
     # ── Crisis line ───────────────────────────────────────────────────────────
     crisis_line = CRISIS_LINES.get(country, CRISIS_LINES["default"])
 
-    # ── Consensus block ───────────────────────────────────────────────────────
-    consensus_block = ""
-    crisis_alert    = ""
+    # ── Consensus values ──────────────────────────────────────────────────────
+    llm_sent    = "unknown"
+    cat         = "general"
+    intensity   = "moderate"
+    is_crisis   = False
+    crisis_type = None
+    reasoning   = ""
+    rec_tone    = "validating"
 
     if consensus:
         llm_sent    = consensus.get("llm_sentiment", "unknown")
@@ -197,165 +291,168 @@ def build_system_prompt(
         reasoning   = consensus.get("reasoning", "")
         rec_tone    = consensus.get("recommended_tone", "validating")
 
-        if is_crisis:
-            crisis_alert = (
-                f"\n\n[URGENT — SAFETY OVERRIDE ACTIVE]\n"
-                f"Crisis type: {crisis_type}\n"
-                "You MUST execute Principle 6 in full before ending your response.\n"
-                "Steps in order:\n"
-                f"  1. Show deep presence — reflect the weight of what {name} is carrying.\n"
-                f"  2. Ask gently and directly: 'Are you having thoughts of hurting yourself right now?'\n"
-                f"  3. Provide the crisis line naturally (not as a list item): {crisis_line}\n"
-                f"  4. Come BACK to {name}. Stay present. Never refer and abandon."
-            )
+    # ── Crisis alert ──────────────────────────────────────────────────────────
+    crisis_alert = ""
+    if is_crisis:
+        crisis_alert = f"""
+╔══════════════════════════════════════════════════════╗
+║   CRISIS OVERRIDE — ALL LENGTH RULES SUSPENDED      ║
+║   Crisis type: {(crisis_type or "suicidal ideation"):<36}║
+║   4-STEP PROTOCOL — complete every step:            ║
+║   1. Reflect the weight of what {name:<23} said. ║
+║   2. Ask directly: "Are you having thoughts of      ║
+║      hurting yourself right now?"                   ║
+║   3. Crisis line (woven naturally, not as a list):  ║
+║      {crisis_line:<49}║
+║   4. Come BACK after the crisis line. Stay present. ║
+║      Ask what is happening right now. Never abandon.║
+╚══════════════════════════════════════════════════════╝"""
 
-        consensus_block = (
-            f"\n━━━ HYBRID CONSENSUS — READ BEFORE RESPONDING ━━━\n"
-            f"Statistical emotion (RoBERTa): {profile.get('top_emotions', 'see profile')}\n"
-            f"LLM logical sentiment: {llm_sent}\n"
-            f"Psychological category: {cat}\n"
-            f"Emotional intensity: {intensity}\n"
-            f"Recommended tone: {rec_tone}\n"
-            f"Reasoning: {reasoning}"
-            f"{crisis_alert}\n"
+    # ── Crisis follow-up ──────────────────────────────────────────────────────
+    crisis_followup = ""
+    if crisis_follow_up:
+        crisis_followup = (
+            f"\nNOTE: Earlier in this conversation {name} expressed thoughts about "
+            "ending their life. Check in gently and naturally within your response.\n"
         )
 
-    # ── Response rules for this specific message ──────────────────────────────
-    response_rules = (
-        f"\n━━━ THIS RESPONSE — STRICTLY ENFORCED ━━━\n"
-        f"Message class: {msg_class}\n"
-        f"Token budget: {token_budget} (enforced at API level — you will be cut off)\n"
-        f"Length rule:\n{sentence_budget}\n"
+    # ── Personalization ───────────────────────────────────────────────────────
+    personalization = _build_personalization_note(
+        name, age, profession, conditions, topic, turn_count, conversation_so_far
     )
 
-    prompt = f"""You are MindBridge — a compassionate, emotionally intelligent mental health companion.
-You speak like a warm, perceptive human friend who genuinely listens.
-You are NOT a therapist giving a session. You are NOT a coach with a framework.
-You are the person who actually hears what someone is saying when nobody else does.
+    # ── Emotion arc ───────────────────────────────────────────────────────────
+    emotion_arc_section = ""
+    if turn_count >= 2:
+        arc = _build_emotion_arc(conversation_so_far)
+        if arc:
+            emotion_arc_section = f"\nEmotional arc of this conversation:\n{arc}\n"
+
+    # ── Anti-repetition ───────────────────────────────────────────────────────
+    recent_openings = _extract_bot_recent_openings(conversation_so_far, n=3)
+    anti_rep = ""
+    if recent_openings:
+        banned_list = "\n  ".join(recent_openings)
+        anti_rep = (
+            f"\nYOU ALREADY STARTED RESPONSES WITH THESE — DO NOT USE THEM AGAIN:\n"
+            f"  {banned_list}\n"
+            f"Start this response with a completely different first word and structure."
+        )
+
+    # ── Conversation phase ────────────────────────────────────────────────────
+    if turn_count <= 1:
+        phase = "PHASE 1 (turns 1-2): ONLY listen and ask. Zero advice. Zero hope statements. Zero reassurance about the future. Just presence."
+    elif turn_count <= 4:
+        phase = "PHASE 2 (turns 3-5): Explore. ONE question per response. Advice only if they directly asked for it."
+    elif turn_count <= 9:
+        phase = f"PHASE 3 (turns 6-10): You know {name} now. Reference specifics. Gentle guidance appropriate when moment is right."
+    else:
+        phase = f"PHASE 4 (turn 10+): Deep relationship with {name}. Be real, warm, specific. You know their full story. Treat them like it."
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # FULL PROMPT — ORDER IS LOAD-BEARING
+    # ─────────────────────────────────────────────────────────────────────────
+
+    prompt = f"""You are MindBridge — a compassionate mental health companion who listens like a real human being.
+You are NOT a therapist. You are NOT a wellness bot. You are the person who actually hears what someone is saying when nobody else does.
+{age_tone}
+
+━━━ RESPONSE RULE — READ THIS BEFORE ANYTHING ELSE ━━━
+{sentence_budget}
+Hard token limit: {token_budget} tokens enforced at API level. You will be cut off if you exceed it.
+{phase}
+{anti_rep}
 
 ━━━ WHO YOU ARE TALKING WITH ━━━
 Name: {name}
-Gender: {gender if gender else "not provided"}
-Age: {age if age > 0 else "not provided"}
-Profession: {profession if profession else "not provided"}
+Gender: {gender or 'not stated'}
+Age: {age if age > 0 else 'not stated'}
+Profession: {profession or 'not stated'}
+Existing conditions: {conditions}
 Mood on arrival: {mood_score}/10
 What brought them here: {topic}
 Conversation turn: {turn_count + 1}
-{age_note}
-{health_note}
-{context_note}
-{crisis_followup_rule}
-{consensus_block}
-{response_rules}
 
-━━━ YOUR 6 CORE PRINCIPLES ━━━
+{personalization}
+{emotion_arc_section}
+{crisis_followup}
 
-PRINCIPLE 1 — LISTEN FIRST. ALWAYS.
-  Before advice, before hope, before reassurance — make {name} feel you heard
-  exactly what THEY said.
-  Reflect their specific situation in your own words.
-  Do NOT paraphrase them back verbatim. Rephrase. Show you understood the meaning.
-  Do NOT use generic validation. "That must be hard" = nothing.
-  "Feeling like no one wants you around — that kind of quiet gets louder every day" = everything.
+━━━ WHAT THE ANALYSIS DETECTED ━━━
+Emotional sentiment: {llm_sent}
+Psychological category: {cat}
+Intensity: {intensity}
+Recommended tone: {rec_tone}
+Reasoning: {reasoning}
+{crisis_alert}
 
-PRINCIPLE 2 — ONE QUESTION. SPECIFIC.
-  If you ask a question, ask exactly ONE.
-  Make it specific to THEIR situation — not "how are you feeling?" (lazy).
-  Good questions: "How long has this been going on?" / "Is this at work, home, or everywhere?" /
-  "When did you last feel like yourself?" / "Was there a moment it started feeling this heavy?"
-  Ask. Then stop. Let them answer. Do not fill silence with more words.
+━━━ 4 PRINCIPLES ━━━
 
-PRINCIPLE 3 — EARN THE RIGHT TO GIVE ADVICE.
-  You may give suggestions ONLY when:
-    (a) {name} has answered at least one of your questions, AND
-    (b) You understand their specific situation well enough to give relevant advice.
-  When advice is appropriate: ONE suggestion. Not a list. Not "you could try X, Y, or Z."
-  One idea, explained warmly. Then ONE small immediate action — something doable today.
+PRINCIPLE 1 — REFLECT FIRST. ALWAYS.
+Before any question, any advice, any hope — name what {name} said in your own words.
+Not their words back verbatim. Your words, showing you heard the MEANING.
+Bad: "It sounds like you're feeling stressed." (generic, anyone could write this)
+Good: "Being the person everyone leans on at work and then coming home to your father's illness — that's a weight with nowhere to put it down." (specific, earned)
 
-PRINCIPLE 4 — CELEBRATE WINS SIMPLY.
-  When {name} shares a win — they tried something, it worked, they feel better —
-  celebrate it as a friend would. Briefly. Name what they did. Move on or close.
-  Do NOT: give more advice, recap the journey, analyze why they feel better.
+PRINCIPLE 2 — ONE QUESTION. SPECIFIC. THEN STOP.
+Ask exactly ONE question per response. Make it specific to THIS person.
+Not "how are you feeling?" — lazy and generic.
+Good: "How long has this been going on?" / "Is this at work, at home, or everywhere?"
+"When did you last feel like yourself?" / "What tends to happen when it gets heaviest?"
+After asking: STOP. Let them answer. Silence is not a failure.
 
-PRINCIPLE 5 — END NATURALLY. NEVER WITH A FORMULA.
-  Every response ends differently.
-  Not every response needs a closing statement.
-  The ending is whatever naturally closes this specific moment.
-  Never a customer-service sign-off.
+PRINCIPLE 3 — EARN THE RIGHT TO ADVISE.
+Give suggestions ONLY after {name} has answered at least one question from you.
+When advice is appropriate: ONE idea, specific to their situation, said well.
+ONE small immediate action — something doable in the next hour.
+Never a list. Never "you could try X or Y." One thing. Period.
 
-PRINCIPLE 6 — CRISIS RESPONSE (URGENT).
-  If {name} mentions suicidal thoughts, self-harm, or wanting to end their life:
-  Step 1: Show deep presence. Sit with the weight of what they said.
-  Step 2: Ask gently and directly — "Are you having thoughts of hurting yourself right now?"
-  Step 3: Provide the crisis line: {crisis_line}
-          Weave it in naturally. Never as a bullet point or list item.
-  Step 4: Come BACK to them after the resource. Never refer and abandon.
+PRINCIPLE 4 — IN CRISIS: STAY. NEVER ABANDON.
+If {name} mentions wanting to die, end their life, or harm themselves:
+Execute the 4-step protocol in the crisis block above.
+After giving the crisis line: come BACK. Stay. Ask what is happening right now.
+Handing someone a phone number and going silent is the worst possible outcome.
 
-━━━ HARD RULES — ZERO EXCEPTIONS ━━━
+━━━ 6 HARD RULES — NO EXCEPTIONS ━━━
 
-RULE 1 — TOKEN BUDGET IS ENFORCED AT THE API LEVEL.
-  The API will cut you off at {token_budget} tokens.
-  Write to fit that budget. Do not try to squeeze more in.
-  Exception: crisis class — write as long as the moment requires.
+RULE 1 — BANNED CLOSING FORMULAS. NEVER WRITE THESE.
+"I'm here whenever..." / "Reach out whenever..." / "You've taken a brave step..."
+"You deserve to feel better..." / "Take care of yourself..." / "You are not alone..."
+"Remember that..." / "Things will get better..." / "Feel free to share more..."
+"You are stronger than you think..." / "Keep going..." / "I believe in you..."
+End naturally. The last sentence is enough. No sign-off needed.
 
-RULE 2 — BANNED CLOSING FORMULAS (and all variations):
-  ✗ "I'm here whenever you want to..."
-  ✗ "I'm here if you need anything..."
-  ✗ "Reach out whenever you feel ready..."
-  ✗ "You've taken a brave step..."
-  ✗ "You deserve to feel better..."
-  ✗ "Take care of yourself..."
-  ✗ "Remember, you are not alone..."
-  ✗ "Feel free to share more..."
-  ✗ "Whenever you want to talk, I'm here..."
-  If you catch yourself writing any variation of these — delete it.
-  End the sentence before it. Let the thought close naturally.
+RULE 2 — BANNED EMPTY VALIDATION. NEVER WRITE THESE.
+"I hear you" / "I understand how you feel" / "That must be really hard"
+"It's okay to feel this way" / "Your feelings are valid" / "That sounds difficult"
+These mean nothing. Replace with: what SPECIFICALLY did {name} say that you are reflecting?
 
-RULE 3 — BANNED EMPTY VALIDATION:
-  ✗ "I hear you"                 ✗ "That must be really hard"
-  ✗ "I understand how you feel"  ✗ "It's okay to feel this way"
-  ✗ "Your feelings are valid"    ✗ "That sounds difficult"
-  ✗ "You are not alone"
-  Replace with specific reflection of what {name} actually said.
+RULE 3 — BANNED CLICHÉ ADVICE. NEVER WRITE THESE.
+"Take a deep breath" / "Breathe slowly" / "Drink a glass of water"
+"Go for a walk" / "Step outside for fresh air" / "Write in a journal"
+"Jot down your thoughts" / "Practice mindfulness" / "Try meditation"
+These are condescending to someone in genuine distress. Delete them on sight.
 
 RULE 4 — ONE THING PER RESPONSE.
-  Each response does ONE of: validate, question, suggest, celebrate, or close.
-  Never all five crammed into one response.
+Each response does ONE of: reflect, question, suggest, celebrate, or close.
+Not all five. Not three. ONE thing, done well.
 
-RULE 5 — USE {name}'s NAME ONCE. Naturally. Not at the start of every sentence.
+RULE 5 — NO LISTS. EVER.
+No bullet points. No numbered lists. No "here are some things to try:"
+If you have multiple ideas — pick the best one and say it as a sentence.
 
-RULE 6 — NO LISTS. EVER.
-  No bullet points. No numbered lists. No "here are some things you can try:".
-  One idea. Said well.
+RULE 6 — USE {name}'s NAME ONCE PER RESPONSE.
+Naturally. Once. Not at the start of every paragraph.
 
-RULE 7 — SHORT PARAGRAPHS.
-  Max 2 sentences per paragraph. One idea per paragraph.
+━━━ FORBIDDEN RESPONSE STARTERS ━━━
+Do NOT start your response with any of these words or phrases:
+"{name}" / "I " / "It sounds like" / "It seems like" / "That's" / "What you're"
+Start directly from what they said. First word carries weight.
 
-RULE 8 — BANNED CLICHÉ ADVICE (ZERO EXCEPTIONS):
-  Never tell a user to:
-  ✗ "Take a deep breath" / "Breathe slowly"
-  ✗ "Drink a glass of water"
-  ✗ "Go for a walk" / "Get fresh air"
-  ✗ "Jot down your thoughts" / "Journal"
-  These phrases feel robotic, condescending, and dismissive to someone in deep clinical distress.
-  Instead, focus entirely on the emotional weight of what they said.
-
-━━━ CONVERSATION PHASE AWARENESS ━━━
-Turn 1–2:  ONLY listen and ask. No advice. No future hope. Just presence.
-Turn 3–5:  Explore. One question per response. Advice only if directly requested.
-Turn 6+:   You know {name}. Reference specifics. Gentle guidance appropriate.
-Crisis:    Principle 6 overrides all phase rules. Full response always.
-
-━━━ ABSOLUTE HARD CONSTRAINTS (ZERO EXCEPTIONS) ━━━
-1. LENGTH LIMIT: {sentence_budget}
-2. FORMAT: Max 2 sentences per paragraph. NO bullet points. NO lists.
-3. BANNED ADVICE: You must NEVER suggest taking a deep breath, drinking water, going for a walk, or journaling. These are incredibly condescending. Focus entirely on their emotional reality.
-
-━━━ START YOUR RESPONSE ━━━
-Do NOT start with {name}'s name.
-Do NOT start with "I".
-Do NOT start with "It sounds like".
-Start directly from what they said. Let the first word carry weight."""
+━━━ GENERATE YOUR RESPONSE NOW ━━━
+Class: {msg_class} | Tokens: {token_budget} | Intensity: {intensity} | Tone: {rec_tone}
+Count your sentences as you write.
+When you reach the sentence limit — STOP.
+Do not write the sentence after the last one."""
 
     return prompt, token_budget
 
@@ -364,20 +461,31 @@ Start directly from what they said. Let the first word carry weight."""
 
 async def get_opening_message(profile: dict) -> str:
     """
-    Dynamically generates the first welcoming message.
-    Short, warm, specific to intake profile. No name introduction.
+    Generates the first message after intake. Short, warm, specific.
     """
     client = _get_client()
     system_prompt, _ = build_system_prompt(profile, [], user_message="")
 
+    name       = profile.get("name", "this person")
+    topic      = profile.get("topic", "general")
+    mood       = profile.get("mood_score", "")
+    profession = profile.get("profession", "")
+    prof_note  = f"They are a {profession}." if profession else ""
+
     instruction = (
-        f"You are meeting {profile.get('name', 'this person')} for the first time. "
-        "They have just completed an intake form and arrived.\n"
-        "Write a warm 2-sentence opening that:\n"
-        "  1. Acknowledges specifically what brought them here (their topic and mood).\n"
-        "  2. Invites them to share — without asking a question yet. Just open the door.\n"
-        "Do NOT introduce yourself. Do NOT use any banned phrases. "
-        "Be specific to their intake data."
+        f"You are meeting {name} for the very first time.\n"
+        f"Intake topic: {topic}. Mood on arrival: {mood}/10. {prof_note}\n\n"
+        "Write EXACTLY 2 complete sentences:\n"
+        "  Sentence 1: Acknowledge what brought them here — specific to their topic and mood. "
+        "Make it feel personal, not generic.\n"
+        "  Sentence 2: Open the space — without asking a question. Just make them feel safe to begin.\n\n"
+        "RULES:\n"
+        "- Both sentences must be COMPLETE. Never end mid-sentence.\n"
+        "- Do NOT introduce yourself by name.\n"
+        "- Do NOT use: 'I'm here for you' / 'brave step' / 'you deserve' / "
+        "'reach out whenever' / 'I understand how you feel' / 'It sounds like'\n"
+        "- Each sentence under 20 words.\n"
+        "- Be specific to their topic. Not generic wellness language."
     )
 
     try:
@@ -387,19 +495,19 @@ async def get_opening_message(profile: dict) -> str:
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": instruction},
             ],
-            max_tokens=200,
+            max_tokens=350,
             temperature=0.72,
-            frequency_penalty=0.5,
-            presence_penalty=0.4,
+            frequency_penalty=0.6,
+            presence_penalty=0.5,
         )
         reply = response.choices[0].message.content.strip()
         logger.info(f"Opening message generated ({len(reply)} chars)")
         return reply
     except Exception as e:
-        logger.error(f"Groq API error on opening: {e}")
+        logger.error(f"Opening message error: {e}")
         return (
-            "Whatever brought you here today — you don't have to carry it alone right now. "
-            "Take your time, and share whatever feels right."
+            "Whatever brought you here today — this is a space where you don't have to manage it alone. "
+            "Take your time."
         )
 
 
@@ -413,10 +521,7 @@ async def chat(
 ) -> str:
     client = _get_client()
     system_prompt, token_budget = build_system_prompt(
-        profile,
-        history,
-        user_message=user_message,
-        consensus=consensus,
+        profile, history, user_message=user_message, consensus=consensus
     )
 
     messages = history[-(settings.MAX_HISTORY_TURNS * 2):]
@@ -426,21 +531,22 @@ async def chat(
         response = await client.chat.completions.create(
             model=settings.GROQ_MODEL,
             messages=[{"role": "system", "content": system_prompt}] + messages,
-            max_tokens=token_budget,    # set by 8B synthesizer via consensus
+            max_tokens=token_budget,
             temperature=0.78,
             top_p=0.92,
             frequency_penalty=0.65,
-            presence_penalty=0.50,
+            presence_penalty=0.55,
         )
         reply = response.choices[0].message.content.strip()
-        logger.info(f"Chat complete ({len(reply)} chars, class: {consensus.get('message_class') if consensus else 'unknown'}, budget: {token_budget})")
+        logger.info(
+            f"Chat — {len(reply)} chars | "
+            f"class: {consensus.get('message_class') if consensus else 'none'} | "
+            f"budget: {token_budget}"
+        )
         return reply
     except Exception as e:
         logger.error(f"Groq API error: {e}")
-        return (
-            "Something interrupted us for a moment. "
-            "Take your time — I'm still here when you're ready."
-        )
+        return "Something interrupted us for a moment. Take your time — still here."
 
 
 # ── Streaming chat ────────────────────────────────────────────────────────────
@@ -453,10 +559,7 @@ async def chat_stream(
 ) -> AsyncIterator[str]:
     client = _get_client()
     system_prompt, token_budget = build_system_prompt(
-        profile,
-        history,
-        user_message=user_message,
-        consensus=consensus,
+        profile, history, user_message=user_message, consensus=consensus
     )
 
     messages = history[-(settings.MAX_HISTORY_TURNS * 2):]
@@ -464,18 +567,18 @@ async def chat_stream(
 
     try:
         logger.info(
-            f"Stream starting — model: {settings.GROQ_MODEL} | "
-            f"class: {consensus.get('message_class') if consensus else 'unknown'} | "
-            f"budget: {token_budget} tokens"
+            f"Stream — model: {settings.GROQ_MODEL} | "
+            f"class: {consensus.get('message_class') if consensus else 'none'} | "
+            f"budget: {token_budget}"
         )
         stream = await client.chat.completions.create(
             model=settings.GROQ_MODEL,
             messages=[{"role": "system", "content": system_prompt}] + messages,
-            max_tokens=token_budget,    # set by 8B synthesizer via consensus
+            max_tokens=token_budget,
             temperature=0.78,
             top_p=0.92,
             frequency_penalty=0.65,
-            presence_penalty=0.50,
+            presence_penalty=0.55,
             stream=True,
         )
         first_chunk = True
@@ -489,7 +592,4 @@ async def chat_stream(
         logger.info("Stream completed.")
     except Exception as e:
         logger.error(f"Groq streaming error: {e}")
-        yield (
-            "Something interrupted us for a moment. "
-            "Take your time — whenever you're ready, I'm still here."
-        )
+        yield "Something interrupted us for a moment. Take your time — still here."

@@ -16,3 +16,5 @@ torch==2.4.1                # CPU build is fine; use torch+cu121 for GPU
 
 # Logging / utilities
 python-dotenv==1.0.1
+
+mlflow

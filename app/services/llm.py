@@ -233,7 +233,7 @@ def build_system_prompt(
     conversation_so_far = conversation_so_far or []
 
     # ── Profile ───────────────────────────────────────────────────────────────
-    name          = profile.get("name", "this person")
+    name          = profile.get("name", "this person").strip("'\"\\ ")  # strip accidental apostrophes
     mood_score    = profile.get("mood_score", "unknown")
     topic         = profile.get("topic", "general wellbeing")
     country       = profile.get("country", "IN")
@@ -246,17 +246,14 @@ def build_system_prompt(
 
     # ── Token budget ──────────────────────────────────────────────────────────
     msg_class    = "emotional_ongoing"
-    token_budget = 350  # Must be high enough to prevent API truncation drops
+    token_budget = 150
 
     if consensus:
         msg_class    = consensus.get("message_class", "emotional_ongoing")
-        # Increase token budget significantly to prevent API dropping the string
-        # token_budget = max(consensus.get("token_budget", 350), 350)
         token_budget = consensus.get("token_budget", 150)
-        
         if consensus.get("is_crisis", False):
             msg_class    = "crisis"
-            token_budget = max(token_budget, 800)
+            token_budget = max(token_budget, CRISIS_TOKEN_FLOOR)
 
     sentence_budget = _SENTENCE_BUDGETS.get(msg_class, _SENTENCE_BUDGETS["emotional_ongoing"])
 
@@ -314,6 +311,28 @@ def build_system_prompt(
         crisis_followup = (
             f"\nNOTE: Earlier in this conversation {name} expressed thoughts about "
             "ending their life. Check in gently and naturally within your response.\n"
+        )
+
+    # ── Crisis repeat prevention ──────────────────────────────────────────────
+    # Check if the safety question was already asked this session.
+    # Never ask "are you having thoughts of hurting yourself" twice in a row.
+    crisis_already_asked = False
+    if conversation_so_far:
+        assistant_msgs = [
+            m["content"] for m in conversation_so_far
+            if m.get("role") == "assistant" and m.get("content", "").strip()
+        ]
+        last_few = " ".join(assistant_msgs[-2:]).lower()
+        if "thoughts of hurting yourself" in last_few or "thoughts of harming yourself" in last_few:
+            crisis_already_asked = True
+
+    crisis_repeat_note = ""
+    if is_crisis and crisis_already_asked:
+        crisis_repeat_note = (
+            f"\nIMPORTANT: You already asked {name} if they are having thoughts of hurting themselves. "
+            "Do NOT ask the safety question again. Instead: stay present with them, "
+            "acknowledge what they just said, and gently encourage them to call the crisis line. "
+            "Keep checking in warmly without repeating the clinical safety question.\n"
         )
 
     # ── Personalization ───────────────────────────────────────────────────────
@@ -376,6 +395,7 @@ Conversation turn: {turn_count + 1}
 {personalization}
 {emotion_arc_section}
 {crisis_followup}
+{crisis_repeat_note}
 
 ━━━ WHAT THE ANALYSIS DETECTED ━━━
 Emotional sentiment: {llm_sent}
@@ -462,53 +482,84 @@ Do not write the sentence after the last one."""
 async def get_opening_message(profile: dict) -> str:
     """
     Generates the first message after intake. Short, warm, specific.
+
+    IMPORTANT: Uses a MINIMAL system prompt — NOT the full build_system_prompt output.
+    The full prompt contains crisis protocol content (╔══ boxes, self-harm language)
+    which triggers Groq content filtering on gpt-oss-120b and returns 0 chars.
+    A clean, simple system prompt avoids this entirely.
     """
     client = _get_client()
-    system_prompt, _ = build_system_prompt(profile, [], user_message="")
 
     name       = profile.get("name", "this person")
-    topic      = profile.get("topic", "general")
+    topic      = profile.get("topic", "general wellbeing")
     mood       = profile.get("mood_score", "")
     profession = profile.get("profession", "")
-    prof_note  = f"They are a {profession}." if profession else ""
+    age        = _safe_int(profile.get("age"))
+    country    = profile.get("country", "IN")
 
-    instruction = (
-        f"You are meeting {name} for the very first time.\n"
-        f"Intake topic: {topic}. Mood on arrival: {mood}/10. {prof_note}\n\n"
-        "Write EXACTLY 2 complete sentences:\n"
-        "  Sentence 1: Acknowledge what brought them here — specific to their topic and mood. "
-        "Make it feel personal, not generic.\n"
-        "  Sentence 2: Open the space — without asking a question. Just make them feel safe to begin.\n\n"
-        "RULES:\n"
-        "- Both sentences must be COMPLETE. Never end mid-sentence.\n"
-        "- Do NOT introduce yourself by name.\n"
-        "- Do NOT use: 'I'm here for you' / 'brave step' / 'you deserve' / "
-        "'reach out whenever' / 'I understand how you feel' / 'It sounds like'\n"
-        "- Each sentence under 20 words.\n"
-        "- Be specific to their topic. Not generic wellness language."
+    # Age-appropriate tone
+    tone = "warm and human"
+    if age > 0 and age < 18:
+        tone = "gentle, age-appropriate, no clinical terms"
+    elif age > 0 and age < 25:
+        tone = "warm, peer-like, not patronizing"
+
+    prof_context = f"They work as a {profession}." if profession else ""
+    mood_context = f"Their mood on arrival is {mood}/10." if mood else ""
+
+    # Minimal system prompt — no crisis content, no heavy rules
+    minimal_system = (
+        f"You are a warm, compassionate mental health companion meeting {name} for the first time. "
+        f"Tone: {tone}. "
+        f"{prof_context} {mood_context} "
+        f"They came here about: {topic}. "
+        "Write naturally. Be specific to their situation. Do not be generic."
+    )
+
+    user_prompt = (
+        f"Write exactly 2 complete sentences as an opening message for {name}:\n"
+        f"Sentence 1: Acknowledge what brought them here ({topic}) in a specific, warm way. "
+        "Reference their topic and mood. Not generic wellness language.\n"
+        "Sentence 2: Invite them to share — without asking a question. "
+        "Just open the space.\n\n"
+        "Hard rules:\n"
+        "- COMPLETE sentences only. Never cut off mid-sentence.\n"
+        "- Do not say: 'I'm here for you' / 'brave step' / 'you deserve' / "
+        "'reach out whenever' / 'I understand' / 'It sounds like'\n"
+        "- Do not start with their name or with 'I'\n"
+        "- Each sentence under 20 words\n"
+        "- No sign-offs, no lists, no clinical terms"
     )
 
     try:
         response = await client.chat.completions.create(
             model=settings.GROQ_MODEL,
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": instruction},
+                {"role": "system", "content": minimal_system},
+                {"role": "user",   "content": user_prompt},
             ],
-            max_tokens=350,
+            max_tokens=120,
             temperature=0.72,
-            frequency_penalty=0.6,
-            presence_penalty=0.5,
+            frequency_penalty=0.5,
+            presence_penalty=0.4,
         )
         reply = response.choices[0].message.content.strip()
+        if not reply:
+            raise ValueError("Empty response from model")
         logger.info(f"Opening message generated ({len(reply)} chars)")
         return reply
     except Exception as e:
         logger.error(f"Opening message error: {e}")
-        return (
-            "Whatever brought you here today — this is a space where you don't have to manage it alone. "
-            "Take your time."
-        )
+        # Fallback based on topic
+        topic_lower = topic.lower()
+        if "grief" in topic_lower or "loss" in topic_lower:
+            return f"Grief doesn't follow a schedule, and whatever you're carrying right now — you don't have to sort it alone. Take your time, {name}."
+        elif "anxiety" in topic_lower or "stress" in topic_lower:
+            return f"Stress that builds up over time has a weight to it that's hard to explain to people who haven't felt it. Whatever brought you here today — this is a space for it."
+        elif "relationship" in topic_lower:
+            return f"Relationship pain has a way of touching everything else in life. Whatever's been happening — share as much or as little as you want."
+        else:
+            return f"Whatever brought you here today — this space doesn't require you to have it figured out. Start wherever feels right, {name}."
 
 
 # ── Main chat (non-streaming) ─────────────────────────────────────────────────

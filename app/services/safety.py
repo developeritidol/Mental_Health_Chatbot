@@ -32,12 +32,12 @@ settings = get_settings()
 # Crisis always overrides — see _apply_crisis_override() below.
 
 MESSAGE_CLASS_BUDGETS: dict[str, int] = {
-    "gratitude":         80,    # "thanks", "you helped", "feel better now"
-    "short_casual":      100,   # ≤5 words, no emotional content
-    "first_disclosure":  150,   # first time sharing an emotional problem
-    "positive_update":   130,   # "i tried it", "i made a friend", "it worked"
-    "advice_request":    220,   # explicitly asking for help or guidance
-    "emotional_ongoing": 200,   # mid-conversation emotional exchange
+    "gratitude":         60,    # "thanks", "feel better" — 1-2 sentences only
+    "short_casual":      80,    # ≤5 words, no emotional content
+    "first_disclosure":  120,   # first emotional disclosure — 3 sentences max
+    "positive_update":   100,   # "i tried it", "it worked" — celebrate briefly
+    "advice_request":    180,   # asking for guidance — 1 suggestion only
+    "emotional_ongoing": 150,   # mid-conversation — reflect + 1 question only
     "crisis":            500,   # is_crisis=True — always gets full budget
 }
 
@@ -167,22 +167,40 @@ MESSAGE CLASS RULES — read every rule before classifying:
   → token_budget: 500
 
 ────────────────────────────────────────────────────────────────
-IS_CRISIS RULES — read carefully:
+IS_CRISIS RULES — THE MOST IMPORTANT SECTION. READ EVERY WORD.
 ────────────────────────────────────────────────────────────────
 
-is_crisis = TRUE only when:
-  • Explicit suicidal ideation: "I want to kill myself", "I want to die", "I am going to end my life"
-  • A plan is mentioned: "I have pills", "I bought a rope", "I know how I'll do it"
-  • Active self-harm: "I am cutting myself right now", "I hurt myself tonight"
-  • Direct farewell with stated intent: "this is my goodbye, I won't be here tomorrow"
+⚠️ CRITICAL RULE: Evaluate is_crisis ONLY from the CURRENT USER MESSAGE.
+Do NOT use the conversation history to escalate crisis classification.
+A person can be in severe emotional distress (high intensity) WITHOUT being in crisis.
+Emotional pain ≠ Crisis. Financial stress ≠ Crisis. Job loss ≠ Crisis. Humiliation ≠ Crisis.
 
-is_crisis = FALSE for:
-  • Passive ideation WITHOUT plan or intent: "I wish I could disappear", "I feel like giving up"
-    → These are high intensity emotional_ongoing, NOT crisis
-  • "I can't go on like this" → high intensity emotional_ongoing
-  • "I want to give up" → high intensity emotional_ongoing
-  • "goodbye" alone (farewell after a normal conversation) → check context, likely gratitude
-  • Frustration: "I want to kill my boss" → NOT crisis (colloquial)
+is_crisis = TRUE ONLY when the CURRENT message contains ONE of these:
+  • Explicit suicidal ideation with intent: "I want to kill myself", "I want to die",
+    "I am going to end my life", "I don't want to be here anymore"
+  • A specific plan: "I have pills ready", "I bought a rope", "I know exactly how I'll do it"
+  • Active self-harm happening now: "I am cutting myself right now", "I hurt myself tonight"
+  • A farewell with explicit stated intent: "this is my goodbye, I won't be here tomorrow"
+
+is_crisis = FALSE for ALL of these — no exceptions, regardless of context:
+  • Job loss, being fired, career failure → NOT crisis. High intensity emotional_ongoing.
+  • Financial stress, EMI pressure, debt → NOT crisis. High intensity emotional_ongoing.
+  • Being told "you are useless", workplace humiliation → NOT crisis. emotional_ongoing.
+  • "I don't know what to do" → NOT crisis. emotional_ongoing or advice_request.
+  • "what should I do now to earn money?" → NOT crisis. This is advice_request.
+  • "I feel like a failure" → NOT crisis. emotional_ongoing.
+  • "I can't go on like this" → NOT crisis. High intensity emotional_ongoing.
+  • "I wish I could disappear" → NOT crisis. Passive ideation = emotional_ongoing.
+  • "I want to give up" → NOT crisis. Emotional exhaustion = emotional_ongoing.
+  • "things are overwhelming" → NOT crisis. emotional_ongoing.
+  • "I have no money and bills due" → NOT crisis. Financial stress = emotional_ongoing.
+  • "I want to kill my boss" → NOT crisis. Colloquial frustration.
+  • Any question asking for practical help or advice → NEVER crisis.
+
+THE TEST: Does the CURRENT message contain the words "kill myself", "end my life",
+"want to die", "hurt myself", or describe an active plan/means? If NO → is_crisis = false.
+If the emotional context is severe but the current message lacks explicit crisis language → is_crisis = false.
+High intensity emotional pain is NOT the same as crisis. Treat them differently.
 
 ────────────────────────────────────────────────────────────────
 TONE GUIDE:

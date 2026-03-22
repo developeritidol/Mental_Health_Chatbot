@@ -31,7 +31,7 @@ from app.core.logger import get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
-CRISIS_TOKEN_FLOOR = 400
+CRISIS_TOKEN_FLOOR = 800
 
 
 def _get_client() -> AsyncGroq:

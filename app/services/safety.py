@@ -41,8 +41,7 @@ MESSAGE_CLASS_BUDGETS: dict[str, int] = {
     "crisis":            500,   # is_crisis=True — always gets full budget
 }
 
-# Minimum token budget for any crisis response — hard floor, never negotiable
-CRISIS_TOKEN_FLOOR = 400
+CRISIS_TOKEN_FLOOR = 800
 
 
 def _get_client() -> AsyncGroq:

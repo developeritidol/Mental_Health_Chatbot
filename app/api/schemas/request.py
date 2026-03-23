@@ -1,29 +1,40 @@
-"""
-Pydantic request models for the Mental Health Chatbot API.
-"""
-
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
+from typing import Optional
 
 
-class MessageTurn(BaseModel):
-    """A single message turn in the conversation history."""
-    role: str = Field(..., description="Either 'user' or 'assistant'")
-    content: str = Field(..., description="The message content")
+class UserProfile(BaseModel):
+    # Core intake fields (all 9 from spec)
+    name: str = Field(..., min_length=1, max_length=80)
+    gender: Optional[str] = None
+    age: Optional[int] = Field(default=None, ge=1, le=120)
+    profession: Optional[str] = None
+    existing_conditions: Optional[str] = None
+    emergency_contact_name: Optional[str] = None
+    emergency_contact_relation: Optional[str] = None
+    emergency_contact_phone: Optional[str] = None   # collected but never sent to LLM
+    # Session fields
+    mood_score: int = Field(..., ge=1, le=10)
+    topic: str = Field(..., min_length=1)
+    country: str = Field(default="IN")              # ISO 2-letter code for crisis line
+    crisis_follow_up: bool = Field(default=False)   # set by frontend after crisis turn
 
 
 class ChatRequest(BaseModel):
-    """Request body for the /api/chat/stream endpoint."""
-    message: str = Field(..., min_length=1, description="The user's current message")
-    session_id: Optional[str] = Field(None, description="Optional session identifier")
-    assessment_results: Optional[Dict[str, str]] = Field(
-        None, description="Results from the initial assessment questionnaire"
-    )
-    conversation_history: Optional[List[MessageTurn]] = Field(
-        default_factory=list, description="Previous conversation turns (last N messages)"
-    )
+    session_id: str
+    message: str = Field(..., min_length=1, max_length=2000)
+    profile: UserProfile
+    history: list[dict] = Field(default_factory=list)
+    sadness_scores: list[float] = Field(default_factory=list)
 
 
-class AnalyzeRequest(BaseModel):
-    """Request body for the /api/analyze endpoint."""
-    message: str = Field(..., min_length=1, description="Text to analyze")
+class AssessmentSubmit(BaseModel):
+    name: str
+    gender: Optional[str] = None
+    age: Optional[int] = None
+    profession: Optional[str] = None
+    existing_conditions: Optional[str] = None
+    emergency_contact_name: Optional[str] = None
+    emergency_contact_relation: Optional[str] = None
+    emergency_contact_phone: Optional[str] = None
+    mood_score: int = Field(..., ge=1, le=10)
+    topic: str

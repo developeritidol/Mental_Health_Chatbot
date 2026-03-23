@@ -14,6 +14,16 @@ async def get_topics():
             "Relationship issues",
             "Work or studies",
             "Grief or loss",
-            "Just need to talk",
         ]
+    }
+
+@router.post("/submit")
+async def submit_assessment(data: dict):
+    # This acts as the API 1 endpoint to receive the profile data.
+    # In a real database, you would save it here based on device_id.
+    logger.info(f"Received profile assessment for device: {data.get('device_id')}")
+    return {
+        "status": "success",
+        "message": "Profile saved.",
+        "device_id": data.get("device_id")
     }

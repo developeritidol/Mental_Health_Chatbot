@@ -12,6 +12,8 @@ class UserProfile(BaseModel):
     emergency_contact_name: Optional[str] = None
     emergency_contact_relation: Optional[str] = None
     emergency_contact_phone: Optional[str] = None   # collected but never sent to LLM
+    personality_summary: Optional[str] = None
+    device_id: str = Field(default="unknown_device")
     # Session fields
     mood_score: int = Field(..., ge=1, le=10)
     topic: str = Field(..., min_length=1)
@@ -36,5 +38,7 @@ class AssessmentSubmit(BaseModel):
     emergency_contact_name: Optional[str] = None
     emergency_contact_relation: Optional[str] = None
     emergency_contact_phone: Optional[str] = None
+    personality_summary: Optional[str] = None
+    device_id: str = Field(default="unknown_device")
     mood_score: int = Field(..., ge=1, le=10)
     topic: str

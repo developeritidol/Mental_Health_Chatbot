@@ -380,6 +380,11 @@ async function handleChatSend(text) {
     state.turnCount++;
     updatePhaseIndicator();
 
+    // Update mood bar dynamically from emotion intensity
+    if (emotionData?.intensity) {
+        updateMoodBar(emotionData.intensity);
+    }
+
     // ── TTS — fixed version ──────────────────────────────────────────────────────
     if (state.voiceEnabled && 'speechSynthesis' in window && fullReply) {
         speakText(fullReply);
@@ -679,8 +684,15 @@ function updateSessionSidebar() {
     }
 }
 
-function updateMoodBar() {
-    const score = state.profile.mood_score;
+function updateMoodBar(intensity) {
+    // Map intensity string to numeric score, or use intake mood_score
+    let score;
+    if (intensity) {
+        const intensityMap = { 'low': 8, 'moderate': 5, 'high': 3, 'severe': 1 };
+        score = intensityMap[intensity] || state.profile.mood_score;
+    } else {
+        score = state.profile.mood_score;
+    }
     if (!score) return;
     dom.moodBarWrap.classList.remove('hidden');
     dom.moodBar.innerHTML = '';

@@ -29,14 +29,12 @@ class Settings(BaseSettings):
     MONGODB_URL: str = "mongodb://localhost:27017"
     DATABASE_NAME: str = "mindbridge_db"
 
-    # ── Groq — Main Generator ─────────────────────────────────────────────────
-    GROQ_API_KEY: str  = ""
-    # GROQ_MODEL:   str  = "openai/gpt-oss-120b"   # Primary generator (highest quality on Groq)
-    # Fallback if 120B is unavailable or too slow:
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    # ── OpenAI — Main Generator ───────────────────────────────────────────────
+    OPENAI_API_KEY: str  = ""
+    MAIN_MODEL: str = "gpt-4o"
 
-    # ── Groq — Synthesizer (Llama-8B — fast, cheap, JSON output) ─────────────
-    SYNTHESIZER_MODEL: str = "llama-3.1-8b-instant"
+    # ── OpenAI — Synthesizer (Fast JSON metadata) ────────────────────────────
+    SYNTHESIZER_MODEL: str = "gpt-4o-mini"
 
     # ── Groq Whisper (STT) ───────────────────────────────────────────────────
     GROQ_WHISPER_MODEL: str = "whisper-large-v3"

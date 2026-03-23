@@ -19,7 +19,7 @@ v3 changes (critical safety fixes):
 """
 from __future__ import annotations
 import json
-from groq import AsyncGroq
+from openai import AsyncOpenAI
 from app.core.config import get_settings
 from app.core.logger import get_logger
 
@@ -32,20 +32,20 @@ settings = get_settings()
 # Crisis always overrides — see _apply_crisis_override() below.
 
 MESSAGE_CLASS_BUDGETS: dict[str, int] = {
-    "gratitude":         80,    # raised from 60 — 60 caused model to ignore class rule entirely
-    "short_casual":      90,    # ≤5 words, no emotional content
-    "first_disclosure":  180,   # raised from 160 — model still cutting off at 160
-    "positive_update":   100,   # "i tried it", "it worked" — celebrate briefly
-    "advice_request":    180,   # asking for guidance — 1 suggestion only
-    "emotional_ongoing": 150,   # mid-conversation — reflect + 1 question only
-    "crisis":            500,   # is_crisis=True — always gets full budget
+    "gratitude":         100,
+    "short_casual":      150,
+    "first_disclosure":  380,   # GPT-4o needs room for genuine empathy
+    "positive_update":   200,
+    "advice_request":    350,
+    "emotional_ongoing": 320,   # enough for a warm, full response without being a wall of text
+    "crisis":            700,
 }
 
 CRISIS_TOKEN_FLOOR = 800
 
 
-def _get_client() -> AsyncGroq:
-    return AsyncGroq(api_key=settings.GROQ_API_KEY)
+def _get_client() -> AsyncOpenAI:
+    return AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
 
 async def synthesize_consensus(

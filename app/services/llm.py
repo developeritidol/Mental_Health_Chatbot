@@ -22,7 +22,7 @@ v4 improvements over v3:
 from __future__ import annotations
 from typing import AsyncIterator, Optional
 
-from groq import AsyncGroq
+from openai import AsyncOpenAI
 
 from app.core.config import get_settings
 from app.core.constants import CRISIS_LINES
@@ -34,8 +34,8 @@ settings = get_settings()
 CRISIS_TOKEN_FLOOR = 800
 
 
-def _get_client() -> AsyncGroq:
-    return AsyncGroq(api_key=settings.GROQ_API_KEY)
+def _get_client() -> AsyncOpenAI:
+    return AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
 
 # ── Safe age parser ───────────────────────────────────────────────────────────
@@ -56,68 +56,51 @@ def _safe_int(value, default: int = 0) -> int:
 
 _SENTENCE_BUDGETS: dict[str, str] = {
     "gratitude": (
-        "The user said thank you or expressed relief. THIS IS A CLOSING MOMENT.\n"
-        "Write EXACTLY 1 short sentence. No more.\n"
-        "Respond in FIRST PERSON directly to the user — not as a narrator describing them.\n"
-        "CORRECT: 'Really glad that helped.' / 'Good to hear.' / 'Glad it landed for you.'\n"
-        "WRONG — asking a question: 'What's your next step?' — NO. The user said THANK YOU. Do not ask anything.\n"
-        "WRONG — third-person: 'Priya's expression of gratitude suggests...' — NO.\n"
-        "WRONG — giving more advice: any sentence that continues the conversation — NO.\n"
-        "The user is wrapping up. Acknowledge it warmly in 1 sentence. STOP."
+        "The user is wrapping up or expressing relief. This is a closing moment.\n"
+        "Respond with 1–2 natural sentences. Warm, brief, and human.\n"
+        "Do NOT ask a question. Do NOT continue the conversation. Just close it gently.\n"
+        "Examples: 'Really glad that helped.' / 'Good to hear — take good care of yourself.' / 'Anytime."
     ),
     "short_casual": (
-        "Write 1 to 3 sentences.\n"
-        "Keep responses concise and focused.\n"
-        "Do not write long paragraphs.\n"
-        "Sentence 1: Warm acknowledgment.\n"
-        "Sentence 2: One gentle open question if natural. Otherwise just 1 sentence.\n"
-        "Do NOT write a 3rd sentence."
+        "The user sent a short casual message. Keep your response brief: 1–3 sentences.\n"
+        "Be warm and natural. A question is optional — only include one if it fits naturally.\n"
+        "Do not over-explain or lecture."
     ),
     "first_disclosure": (
-        "Write EXACTLY 3 sentences. Count each one. Stop at 3.\n"
-        "Sentence 1: Reflect their specific situation in your own words. "
-        "Not generic. Rephrase what they said to show you heard the meaning.\n"
-        "Sentence 2: One sentence on why this feeling makes sense for their situation.\n"
-        "Sentence 3: Ask ONE specific question. Not 'how are you feeling?' — too lazy. "
-        "Ask: 'How long has this been going on?' or 'Is this at work, home, or everywhere?' "
-        "or 'Was there a moment it started feeling this heavy?'\n"
-        "After sentence 3: STOP. No advice. No reassurance. No closing. Just stop."
+        "The user is sharing something painful or important for the first time.\n"
+        "This is the most important response you will write in the conversation.\n"
+        "Write 3–5 sentences. Your job right now is ONLY to make them feel heard, not to fix anything.\n"
+        "Start by reflecting specifically what they said — in your own words, not theirs.\n"
+        "Then sit with the weight of what they shared. Show them you understand what this actually feels like.\n"
+        "A question at the end is optional — only ask one if it deepens the conversation. Never interrogate."
     ),
     "positive_update": (
-        "Write 1 to 3 sentences.\n"
-        "Keep responses concise and focused.\n"
-        "Do not write long paragraphs.\n"
-        "Sentence 1: Celebrate the SPECIFIC action they took — name exactly what they did.\n"
-        "Sentence 2: One brief natural observation. If a forward step feels natural, include it.\n"
-        "After sentence 2: STOP. No recap. No more advice. Just stop."
+        "The user shared a win or a step forward. Celebrate it genuinely.\n"
+        "Write 2–4 sentences. Name what they actually did — do not be generic.\n"
+        "Be warm and human. Share in their moment with them."
     ),
     "advice_request": (
-        "Write EXACTLY 3 sentences. Count them. Stop at 3.\n"
-        "Sentence 1: Briefly acknowledge the situation — 1 sentence only.\n"
-        "Sentence 2: Give ONE specific, practical suggestion. Not a list. "
-        "ONE idea, explained well. Make it specific to THIS person's situation.\n"
-        "Sentence 3: ONE small immediate action they can try in the next hour.\n"
-        "After sentence 3: STOP. No lists. No alternatives. Just stop."
+        "The user is asking for help or guidance.\n"
+        "Write 3–5 sentences. First, briefly acknowledge what's going on (1 sentence).\n"
+        "Then give ONE concrete, specific suggestion — not a list, not options, one thing.\n"
+        "Make it immediately actionable and specific to this person's situation.\n"
+        "Be direct. 'Do X' not 'You could consider doing X.'"
     ),
     "emotional_ongoing": (
-        "Write EXACTLY 2 sentences. Count them. Stop at 2.\n"
-        "Sentence 1: Reflect the specific thing they just said — not generically, specifically.\n"
-        "Sentence 2: EITHER ask ONE focused question about their situation "
-        "OR offer ONE grounded observation. Pick one. Not both.\n"
-        "After sentence 2: STOP. No advice unless they asked for it. Just stop."
+        "The user is in the middle of a difficult conversation.\n"
+        "Write 2–4 sentences. Continue being a present, warm listener.\n"
+        "Reflect the specific thing they just said. Then either sit with it, or gently explore one aspect.\n"
+        "A question is OPTIONAL. Only ask one if it genuinely deepens understanding. Never interrogate.\n"
+        "Sometimes the most human response is to simply say 'I hear you' in a specific, real way."
     ),
     "crisis": (
         "LENGTH RULES ARE SUSPENDED FOR THIS RESPONSE.\n"
         "Write as long as the moment requires.\n"
-        "You MUST complete all 4 steps of the CRISIS PROTOCOL before ending.\n"
-        "MANDATORY CHECKLIST — your response is incomplete without ALL of these:\n"
-        "  [ ] Step 1: Deep presence — you reflected the weight of what they said\n"
-        "  [ ] Step 2: Safety question — you asked if they are having thoughts of hurting themselves\n"
-        "  [ ] Step 3: CRISIS LINE — you included the phone number in your response text\n"
-        "             This is NON-NEGOTIABLE. The number must appear in your response.\n"
-        "             If you finish writing and the number is not there — go back and add it.\n"
-        "  [ ] Step 4: Return — you came back to them after the number. You are still here.\n"
-        "Do not end your response until all 4 checkboxes are complete."
+        "You MUST complete all 4 steps of the CRISIS PROTOCOL before ending:\n"
+        "  Step 1: Deep presence — reflect the weight of what they said\n"
+        "  Step 2: Safety question — ask if they are having thoughts of hurting themselves\n"
+        "  Step 3: Include the CRISIS LINE phone number in your response text (NON-NEGOTIABLE)\n"
+        "  Step 4: Come back to them after the number. You are still here. Do not abandon them."
     ),
 }
 
@@ -611,10 +594,9 @@ Do NOT start your response with any of these words or phrases:
 Start directly from what they said. First word carries weight.
 
 ━━━ GENERATE YOUR RESPONSE NOW ━━━
-Class: {msg_class} | Tokens: {token_budget} | Intensity: {intensity} | Tone: {rec_tone}
-Count your sentences as you write.
-When you reach the sentence limit — STOP.
-Do not write the sentence after the last one."""
+Class: {msg_class} | Intensity: {intensity} | Tone: {rec_tone}
+Write naturally. Do not count sentences. Let the response feel human — not measured.
+If you finish and it feels cut off, add one more sentence. If it feels complete, stop."""
 
     return prompt, token_budget
 
@@ -675,7 +657,7 @@ async def get_opening_message(profile: dict) -> str:
 
     try:
         response = await client.chat.completions.create(
-            model=settings.GROQ_MODEL,
+            model=settings.MAIN_MODEL,
             messages=[
                 {"role": "system", "content": minimal_system},
                 {"role": "user",   "content": user_prompt},
@@ -722,7 +704,7 @@ async def chat(
 
     try:
         response = await client.chat.completions.create(
-            model=settings.GROQ_MODEL,
+            model=settings.MAIN_MODEL,
             messages=[{"role": "system", "content": system_prompt}] + messages,
             max_tokens=token_budget,
             temperature=0.78,
@@ -760,12 +742,12 @@ async def chat_stream(
 
     try:
         logger.info(
-            f"Stream — model: {settings.GROQ_MODEL} | "
+            f"Stream — model: {settings.MAIN_MODEL} | "
             f"class: {consensus.get('message_class') if consensus else 'none'} | "
             f"budget: {token_budget}"
         )
         stream = await client.chat.completions.create(
-            model=settings.GROQ_MODEL,
+            model=settings.MAIN_MODEL,
             messages=[{"role": "system", "content": system_prompt}] + messages,
             max_tokens=token_budget,
             temperature=0.78,
@@ -784,5 +766,5 @@ async def chat_stream(
                 yield delta
         logger.info("Stream completed.")
     except Exception as e:
-        logger.error(f"Groq streaming error: {e}")
+        logger.error(f"[OPENAI STREAM ERROR] {type(e).__name__}: {e}")
         yield "Something interrupted us for a moment. Take your time — still here."

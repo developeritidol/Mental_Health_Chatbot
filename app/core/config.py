@@ -21,10 +21,13 @@ logger = get_logger(__name__)
 
 
 class Settings(BaseSettings):
-    # ── App ───────────────────────────────────────────────────────────────────
     APP_NAME:    str = "MindBridge"
     APP_VERSION: str = "1.0.0"
     DEBUG:       bool = False
+    
+    # ── Database ──────────────────────────────────────────────────────────────
+    MONGODB_URL: str = "mongodb://localhost:27017"
+    DATABASE_NAME: str = "mindbridge_db"
 
     # ── Groq — Main Generator ─────────────────────────────────────────────────
     GROQ_API_KEY: str  = ""

@@ -22,6 +22,7 @@ from app.api.schemas.response import ChatResponse, OpeningMessageResponse, Emoti
 from app.services import emotion as emotion_svc
 from app.services import llm as llm_svc
 from app.services.safety import synthesize_consensus
+from app.services.db_service import create_session, save_message, get_formatted_history, upsert_user_profile
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -81,7 +82,19 @@ async def get_opening_message(profile: dict):
     """
     logger.info("Generating opening message for new session.")
     session_id = str(uuid.uuid4())
-    message    = await llm_svc.get_opening_message(profile)
+    
+    # Force save the user profile in case the frontend skipped the assessment API
+    await upsert_user_profile(profile)
+    
+    await create_session({
+        "session_id": session_id,
+        "device_id": profile.get("device_id", "unknown_device"),
+        "topic": profile.get("topic", "general wellbeing"),
+        "initial_mood_score": profile.get("mood_score", 0),
+        "country": profile.get("country", "IN")
+    })
+    
+    message = await llm_svc.get_opening_message(profile)
     logger.info(f"Opening message generated. Session ID: {session_id}")
     return OpeningMessageResponse(message=message, session_id=session_id)
 
@@ -152,13 +165,26 @@ async def send_message(req: ChatRequest):
 @router.post("/stream")
 async def stream_message(req: ChatRequest):
     profile_dict       = req.profile.model_dump()
-    turn_count         = _get_turn_count(req.history)
-    recent_history_str = _build_recent_history_string(req.history, n_turns=4)
+    
+    # Sync profile to database on every interaction to capture updates
+    await upsert_user_profile(profile_dict)
+    
+    # DB Integration: Override frontend history array with trusted database truth
+    history_from_db    = await get_formatted_history(req.session_id, limit=20)
+    turn_count         = len(history_from_db) // 2
+    recent_history_str = _build_recent_history_string(history_from_db, n_turns=4)
 
     logger.info("\n" + "═" * 70)
     logger.info(f"[STREAM] Session: {req.session_id} | Turn: {turn_count}")
     logger.info(f"[USER]:  {req.message}")
     logger.info("═" * 70)
+    
+    await save_message({
+        "session_id": req.session_id,
+        "turn_number": turn_count + 1,
+        "role": "user",
+        "content": req.message
+    })
 
     # Step 1 — RoBERTa
     try:
@@ -205,7 +231,7 @@ async def stream_message(req: ChatRequest):
             async for chunk in llm_svc.chat_stream(
                 user_message=req.message,
                 profile=profile_dict,
-                history=req.history,
+                history=history_from_db,  # Send the DB history to the LLM
                 consensus=consensus,
             ):
                 full_reply.append(chunk)
@@ -224,6 +250,21 @@ async def stream_message(req: ChatRequest):
 
             final = "".join(full_reply)
             logger.info(f"[STEP 3 OK] {len(final)} chars")
+            
+            # Save the final AI response to DB along with metadata analysis
+            roberta_doc = None
+            if emotion_result:
+                roberta_doc = {"dominant_emotion": emotion_result.dominant, "scores": emotion_result.scores}
+                
+            await save_message({
+                "session_id": req.session_id,
+                "turn_number": turn_count + 1,
+                "role": "assistant",
+                "content": final,
+                "roberta_analysis": roberta_doc,
+                "llm_consensus": consensus
+            })
+            
             logger.info(f"[AI RESPONSE]:\n{final}\n" + "═" * 70)
 
         except Exception as e:

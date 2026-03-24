@@ -1,4 +1,5 @@
 import logging
+import certifi
 from motor.motor_asyncio import AsyncIOMotorClient
 from app.core.config import get_settings
 
@@ -13,7 +14,8 @@ db_manager = DatabaseManager()
 
 async def connect_to_mongo():
     logger.info("Connecting to MongoDB...")
-    db_manager.client = AsyncIOMotorClient(settings.MONGODB_URL)
+    # Explicitly use certifi to resolve Docker/Atlas TLSV1_ALERT_INTERNAL_ERROR bugs
+    db_manager.client = AsyncIOMotorClient(settings.MONGODB_URL, tlsCAFile=certifi.where())
     db_manager.db = db_manager.client[settings.DATABASE_NAME]
     
     # Ensure Indexes for performance

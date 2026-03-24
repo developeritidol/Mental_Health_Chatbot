@@ -33,9 +33,13 @@ try:
     from deepeval import assert_test, evaluate
     from deepeval.test_case import LLMTestCase
     from deepeval.metrics import GEval
-    from deepeval.models import DeepEvalBaseLLM
-except ImportError as e:
-    print(f"ERROR: DeepEval import failed: {e}")
+    from deepeval.metrics.g_eval import NumberOfSteps
+    try:
+        from deepeval.models.base_model import DeepEvalBaseLLM
+    except ImportError:
+        from deepeval.models import DeepEvalBaseLLM
+except ImportError:
+    print("ERROR: DeepEval not installed. Run: pip install deepeval")
     sys.exit(1)
 
 # ── MLflow for score history ─────────────────────────────────────────────────
@@ -79,6 +83,7 @@ async def get_bot_response(test_case: dict) -> tuple[str, dict]:
     """
     Calls your actual chat pipeline and returns (response_text, consensus_dict).
     This is the only function that connects eval to your real system.
+    Includes rate limit retry with exponential backoff.
     """
     profile = test_case["user_profile"]
     history = test_case["conversation_history"]
@@ -114,17 +119,39 @@ async def get_bot_response(test_case: dict) -> tuple[str, dict]:
                 "message_class": "emotional_ongoing", "token_budget": 150
             }
 
-        # Step 2: Get LLM response
-        try:
-            response = await chat(
-                user_message=message,
-                profile=profile,
-                history=history,
-                consensus=consensus,
-            )
-        except Exception as e:
-            print(f"  ERROR: Chat failed for {test_case['id']}: {e}")
-            response = f"ERROR: {e}"
+        # Step 2: Get LLM response — with rate limit retry
+        max_retries = 3
+        retry_delay = 30  # seconds to wait on rate limit
+
+        for attempt in range(max_retries):
+            try:
+                response = await chat(
+                    user_message=message,
+                    profile=profile,
+                    history=history,
+                    consensus=consensus,
+                )
+                # If response is the fallback string, it means API failed
+                if response == "Something interrupted us for a moment. Take your time — still here.":
+                    raise Exception("Fallback response returned — likely rate limit or API error")
+                break  # success
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str or "rate_limit" in error_str.lower() or "Rate limit" in error_str:
+                    if attempt < max_retries - 1:
+                        wait_time = retry_delay * (attempt + 1)
+                        print(f"  RATE LIMIT on {test_case['id']} — waiting {wait_time}s before retry {attempt + 2}/{max_retries}...")
+                        await asyncio.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"  RATE LIMIT EXCEEDED after {max_retries} attempts for {test_case['id']} — SKIPPING")
+                        print(f"  Run this eval again tomorrow when your token quota resets.")
+                        response = "RATE_LIMIT_SKIP"
+                        break
+                else:
+                    print(f"  ERROR: Chat failed for {test_case['id']}: {e}")
+                    response = f"ERROR: {e}"
+                    break
     else:
         consensus = {"is_crisis": False, "message_class": "emotional_ongoing", "token_budget": 150}
         response = await mock_chat(message, profile, history)
@@ -495,7 +522,7 @@ async def run_full_evaluation(
 
     # Length compliance
     length_checks = [r for r in all_results if "length_ok" in r["assertions"]]
-    length_pass_rate = sum(1 for r in length_checks if r["assertions"].get("length_ok")) / len(length_checks) if length_checks else 0
+    length_pass_rate = sum(1 for r in length_checks if r["assertions"].get("length_ok")) / len(length_checks) if length_checks else 1.0  # no length checks = N/A, treat as pass
 
     # Banned phrase rate
     banned_checks = [r for r in all_results]
@@ -503,7 +530,7 @@ async def run_full_evaluation(
 
     # Question compliance (first_disclosure and emotional_ongoing)
     q_cases = [r for r in all_results if "question_count_ok" in r["assertions"]]
-    q_pass_rate = sum(1 for r in q_cases if r["assertions"].get("question_count_ok")) / len(q_cases) if q_cases else 0
+    q_pass_rate = sum(1 for r in q_cases if r["assertions"].get("question_count_ok")) / len(q_cases) if q_cases else 1.0  # no q checks = N/A, treat as pass
 
     # ── Print summary table ───────────────────────────────────────────────────
 

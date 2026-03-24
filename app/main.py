@@ -18,16 +18,23 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("MindBridge starting up...")
-    # Warm up the HuggingFace emotion model in a background thread
+    
+    # 1. Connect to MongoDB
+    from app.core.database import connect_to_mongo, close_mongo_connection
+    await connect_to_mongo()
+    
+    # 2. Warm up the HuggingFace emotion model in a background thread
     loop = asyncio.get_event_loop()
     try:
         from app.services.emotion import warmup
         await loop.run_in_executor(None, warmup)
     except Exception as e:
         logger.warning(f"Model warmup skipped: {e}")
+        
     logger.info("MindBridge ready.")
     yield
     logger.info("MindBridge shutting down.")
+    await close_mongo_connection()
 
 
 # ── App ───────────────────────────────────────────────────────────────────────

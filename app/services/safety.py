@@ -19,7 +19,7 @@ v3 changes (critical safety fixes):
 """
 from __future__ import annotations
 import json
-from groq import AsyncGroq
+from openai import AsyncOpenAI
 from app.core.config import get_settings
 from app.core.logger import get_logger
 
@@ -32,20 +32,20 @@ settings = get_settings()
 # Crisis always overrides — see _apply_crisis_override() below.
 
 MESSAGE_CLASS_BUDGETS: dict[str, int] = {
-    "gratitude":         80,    # raised from 60 — 60 caused model to ignore class rule entirely
-    "short_casual":      90,    # ≤5 words, no emotional content
-    "first_disclosure":  180,   # raised from 160 — model still cutting off at 160
-    "positive_update":   100,   # "i tried it", "it worked" — celebrate briefly
-    "advice_request":    180,   # asking for guidance — 1 suggestion only
-    "emotional_ongoing": 150,   # mid-conversation — reflect + 1 question only
-    "crisis":            500,   # is_crisis=True — always gets full budget
+    "gratitude":         100,
+    "short_casual":      150,
+    "first_disclosure":  380,   # GPT-4o needs room for genuine empathy
+    "positive_update":   200,
+    "advice_request":    350,
+    "emotional_ongoing": 320,   # enough for a warm, full response without being a wall of text
+    "crisis":            700,
 }
 
 CRISIS_TOKEN_FLOOR = 800
 
 
-def _get_client() -> AsyncGroq:
-    return AsyncGroq(api_key=settings.GROQ_API_KEY)
+def _get_client() -> AsyncOpenAI:
+    return AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
 
 async def synthesize_consensus(
@@ -122,14 +122,14 @@ MESSAGE CLASS RULES — read every rule before classifying:
   → ⚠️ WARNING: Do NOT classify as gratitude if message contains farewell with distress.
      "goodbye, nobody will miss me" = emotional_ongoing or crisis, NOT gratitude.
      "bye, feeling better now" = gratitude. The difference is presence of distress.
-  → token_budget: 80
+  → token_budget: 100
 
 "short_casual"
   → Very short message (1–5 words) with no emotional content detected.
   → Examples: "ok", "hey", "what do you mean", "i see"
   → Do NOT use this if the short message contains emotional signal.
      "i'm done" is NOT short_casual — it is emotional_ongoing or crisis.
-  → token_budget: 100
+  → token_budget: 150
 
 "first_disclosure"
   → Turn 0–2 AND user is sharing an emotional problem, life event, or difficult situation for the first time.
@@ -142,14 +142,14 @@ MESSAGE CLASS RULES — read every rule before classifying:
      "I feel lonely" = first_disclosure ✓
   → The test: is the user SHARING something that just happened or how they feel?
     If yes → first_disclosure. They are not asking for help yet. They are telling you what happened.
-  → token_budget: 150
+  → token_budget: 380
 
 "positive_update"
   → User is sharing that something they tried worked, or that they feel better
     as a RESULT of a specific action they took.
   → Examples: "i talked to someone today", "i tried what you said and it worked",
     "i made a friend at work", "went outside and felt a bit better"
-  → token_budget: 130
+  → token_budget: 200
 
 "advice_request"
   → User is EXPLICITLY and clearly asking for guidance, how-to, or what to do.
@@ -162,17 +162,17 @@ MESSAGE CLASS RULES — read every rule before classifying:
   → The ONLY test: does the message contain a question mark OR the words "should I", "how do I",
     "what should", "how can I", "give me advice", "what do I do"?
     If NO question or explicit request → it is NOT advice_request. Use first_disclosure or emotional_ongoing.
-  → token_budget: 180
+  → token_budget: 350
 
 "emotional_ongoing"
   → Default class for any message that is emotional in nature and doesn't fit above.
   → When in doubt, use this. It is always safer than advice_request or gratitude.
-  → token_budget: 200
+  → token_budget: 320
 
 "crisis"
   → is_crisis is true.
   → Always set message_class to "crisis" when is_crisis is true.
-  → token_budget: 500
+  → token_budget: 700
 
 ────────────────────────────────────────────────────────────────
 IS_CRISIS RULES — THE MOST IMPORTANT SECTION. READ EVERY WORD.

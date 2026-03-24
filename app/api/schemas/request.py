@@ -2,43 +2,38 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 
-class UserProfile(BaseModel):
-    # Core intake fields (all 9 from spec)
+# ── Assessment API schemas ────────────────────────────────────────────────────
+
+class ProfileInput(BaseModel):
+    """Profile data collected during onboarding."""
     name: str = Field(..., min_length=1, max_length=80)
     gender: Optional[str] = None
     age: Optional[int] = Field(default=None, ge=1, le=120)
-    profession: Optional[str] = None
-    existing_conditions: Optional[str] = None
-    emergency_contact_name: Optional[str] = None
-    emergency_contact_relation: Optional[str] = None
-    emergency_contact_phone: Optional[str] = None   # collected but never sent to LLM
-    personality_summary: Optional[str] = None
-    device_id: str = Field(default="unknown_device")
-    # Session fields
-    mood_score: int = Field(..., ge=1, le=10)
-    topic: str = Field(..., min_length=1)
-    country: str = Field(default="IN")              # ISO 2-letter code for crisis line
-    crisis_follow_up: bool = Field(default=False)   # set by frontend after crisis turn
-
-
-class ChatRequest(BaseModel):
-    session_id: str
-    message: str = Field(..., min_length=1, max_length=2000)
-    profile: UserProfile
-    history: list[dict] = Field(default_factory=list)
-    sadness_scores: list[float] = Field(default_factory=list)
-
-
-class AssessmentSubmit(BaseModel):
-    name: str
-    gender: Optional[str] = None
-    age: Optional[int] = None
-    profession: Optional[str] = None
-    existing_conditions: Optional[str] = None
     emergency_contact_name: Optional[str] = None
     emergency_contact_relation: Optional[str] = None
     emergency_contact_phone: Optional[str] = None
-    personality_summary: Optional[str] = None
-    device_id: str = Field(default="unknown_device")
-    mood_score: int = Field(..., ge=1, le=10)
-    topic: str
+
+
+class PersonalityAnswers(BaseModel):
+    """5 static personality questions. Values: 'Yes' / 'No' / 'Sometimes'."""
+    prefers_solitude: str = "Sometimes"
+    logic_over_emotion: str = "Sometimes"
+    plans_ahead: str = "Sometimes"
+    energized_by_social: str = "Sometimes"
+    trusts_instincts: str = "Sometimes"
+
+
+class AssessmentRequest(BaseModel):
+    """POST /api/assessment — one-time onboarding from Android."""
+    device_id: str = Field(..., min_length=1)
+    profile: ProfileInput
+    personality_answers: PersonalityAnswers
+
+
+# ── Chat API schemas ─────────────────────────────────────────────────────────
+
+class StreamChatRequest(BaseModel):
+    """POST /api/chat/stream — every chat message from Android."""
+    session_id: str = Field(..., min_length=1)
+    device_id: str = Field(..., min_length=1)
+    message: str = Field(..., min_length=1, max_length=2000)

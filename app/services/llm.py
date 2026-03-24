@@ -82,27 +82,20 @@ def _build_emotion_arc(history: list[dict]) -> str:
 
 
 def _build_personalization_note(
-    name: str, age: int, profession: str, conditions: str,
-    topic: str, turn_count: int, history: list[dict]
+    name: str, age: int, turn_count: int, history: list[dict]
 ) -> str:
     """ 
     Builds personalization context that deepens with turns.
     """
     if turn_count == 0:
         parts = []
-        if profession:
-            parts.append(f"{name} is a {profession}")
         if age > 0:
             parts.append(f"age {age}")
-        if conditions and conditions.lower() not in ("none", "no", ""):
-            parts.append(f"living with {conditions}")
-        base = (", ".join(parts) + ".") if parts else ""
-        return f"{base} They came here about: {topic}."
+        return (f"{name}, " + ", ".join(parts) + ".") if parts else ""
 
     if turn_count <= 2:
         return (
             f"You've just started talking with {name}. "
-            f"They came here about {topic}. "
             "You don't know much yet — be curious, not assumptive."
         )
 
@@ -121,6 +114,12 @@ def _build_personalization_note(
 
     # Turn 6+: deep personalization
     all_shared = (" | ".join(user_msgs[-6:]))[:400] if user_msgs else ""
+    return (
+        f"You know {name} well by now. "
+        f"Here's what they've shared over the conversation: {all_shared}. "
+        "Use this to be specific and personal. Reference things they told you earlier."
+    )
+
 # ── System prompt builder ─────────────────────────────────────────────────────
 
 def build_system_prompt(
@@ -140,12 +139,8 @@ def build_system_prompt(
 
     # ── Profile ───────────────────────────────────────────────────────────────
     name          = profile.get("name", "this person").strip("'\"\ ")
-    mood_score    = profile.get("mood_score", "unknown")
-    topic         = profile.get("topic", "general wellbeing")
     country       = profile.get("country", "IN")
     gender        = profile.get("gender", "")
-    profession    = profile.get("profession", "")
-    conditions    = profile.get("existing_conditions", "None")
     personality   = profile.get("personality_summary", "Not provided")
     crisis_follow_up = profile.get("crisis_follow_up", False)
     age           = _safe_int(profile.get("age"))
@@ -265,7 +260,7 @@ def build_system_prompt(
 
     # ── Personalization ───────────────────────────────────────────────────────
     personalization = _build_personalization_note(
-        name, age, profession, conditions, topic, turn_count, conversation_so_far
+        name, age, turn_count, conversation_so_far
     )
 
     # ── Emotion arc ───────────────────────────────────────────────────────────
@@ -297,7 +292,7 @@ You never use therapy-speak or motivational poster language. No "You're not alon
 
 {anti_rep}
 
-You are talking with {name}. {f"Gender: {gender}. " if gender else ""}{f"Age: {age}. " if age > 0 else ""}{f"Works as a {profession}. " if profession else ""}{f"Living with {conditions}. " if conditions and conditions.lower() not in ('none', 'no', '') else ""}Their personality: {personality}. They arrived with mood {mood_score}/10, here about: {topic}. This is turn {turn_count + 1}.
+You are talking with {name}. {f"Gender: {gender}. " if gender else ""}{f"Age: {age}. " if age > 0 else ""}Their personality: {personality}. This is turn {turn_count + 1}.
 
 {personalization}
 {emotion_arc_section}
@@ -314,21 +309,16 @@ Their current emotional state: {llm_sent} ({cat}, {intensity} intensity). Recomm
 
 async def get_opening_message(profile: dict) -> str:
     """
-    Generates the first message after intake. Short, warm, specific.
-
-    IMPORTANT: Uses a MINIMAL system prompt — NOT the full build_system_prompt output.
-    The full prompt contains crisis protocol content (╔══ boxes, self-harm language)
-    which triggers Groq content filtering on gpt-oss-120b and returns 0 chars.
-    A clean, simple system prompt avoids this entirely.
+    Generates the first message after onboarding.
+    Warm, human, personality-aware. No topic or mood — the AI discovers
+    what's on the user's mind through natural conversation.
     """
     client = _get_client()
 
-    name       = profile.get("name", "this person")
-    topic      = profile.get("topic", "general wellbeing")
-    mood       = profile.get("mood_score", "")
-    profession = profile.get("profession", "")
+    name       = profile.get("name", "Friend")
+    personality = profile.get("personality_summary", "")
     age        = _safe_int(profile.get("age"))
-    country    = profile.get("country", "IN")
+    gender     = profile.get("gender", "")
 
     # Age-appropriate tone
     tone = "warm and human"
@@ -337,30 +327,24 @@ async def get_opening_message(profile: dict) -> str:
     elif age > 0 and age < 25:
         tone = "warm, peer-like, not patronizing"
 
-    prof_context = f"They work as a {profession}." if profession else ""
-    mood_context = f"Their mood on arrival is {mood}/10." if mood else ""
+    personality_context = f"Their personality: {personality}." if personality else ""
 
-    # Minimal system prompt — no crisis content, no heavy rules
     minimal_system = (
-        f"You are a warm, compassionate mental health companion meeting {name} for the first time. "
-        f"Tone: {tone}. "
-        f"{prof_context} {mood_context} "
-        f"They came here about: {topic}. "
-        "Write naturally. Be specific to their situation. Do not be generic."
+        f"You are MindBridge, a warm mental health companion meeting {name} for the first time. "
+        f"Tone: {tone}. {personality_context} "
+        "You are NOT a therapist. You are the kind of friend who makes people feel safe. "
+        "Write naturally. Be genuine, not generic."
     )
 
     user_prompt = (
-        f"Write exactly 2 complete sentences as an opening message for {name}:\n"
-        f"Sentence 1: Acknowledge what brought them here ({topic}) in a specific, warm way. "
-        "Reference their topic and mood. Not generic wellness language.\n"
-        "Sentence 2: Invite them to share — without asking a question. "
-        "Just open the space.\n\n"
-        "Hard rules:\n"
+        f"Write a warm opening message for {name} (2-3 sentences).\n"
+        "Welcome them genuinely. Let them know this is a safe space to talk about whatever is on their mind. "
+        "Gently invite them to share what brought them here — but don't pressure.\n\n"
+        "Rules:\n"
         "- COMPLETE sentences only. Never cut off mid-sentence.\n"
-        "- Do not say: 'I'm here for you' / 'brave step' / 'you deserve' / "
+        "- Do not say: 'I\'m here for you' / 'brave step' / 'you deserve' / "
         "'reach out whenever' / 'I understand' / 'It sounds like'\n"
         "- Do not start with their name or with 'I'\n"
-        "- Each sentence under 20 words\n"
         "- No sign-offs, no lists, no clinical terms"
     )
 
@@ -371,10 +355,10 @@ async def get_opening_message(profile: dict) -> str:
                 {"role": "system", "content": minimal_system},
                 {"role": "user",   "content": user_prompt},
             ],
-            max_tokens=120,
-            temperature=0.72,
-            frequency_penalty=0.5,
-            presence_penalty=0.4,
+            max_tokens=150,
+            temperature=0.65,
+            frequency_penalty=0.35,
+            presence_penalty=0.25,
         )
         reply = response.choices[0].message.content.strip()
         if not reply:
@@ -383,16 +367,10 @@ async def get_opening_message(profile: dict) -> str:
         return reply
     except Exception as e:
         logger.error(f"Opening message error: {e}")
-        # Fallback based on topic
-        topic_lower = topic.lower()
-        if "grief" in topic_lower or "loss" in topic_lower:
-            return f"Grief doesn't follow a schedule, and whatever you're carrying right now — you don't have to sort it alone. Take your time, {name}."
-        elif "anxiety" in topic_lower or "stress" in topic_lower:
-            return f"Stress that builds up over time has a weight to it that's hard to explain to people who haven't felt it. Whatever brought you here today — this is a space for it."
-        elif "relationship" in topic_lower:
-            return f"Relationship pain has a way of touching everything else in life. Whatever's been happening — share as much or as little as you want."
-        else:
-            return f"Whatever brought you here today — this space doesn't require you to have it figured out. Start wherever feels right, {name}."
+        return (
+            f"Whatever brought you here today — this space doesn't require "
+            f"you to have it figured out. Start wherever feels right, {name}."
+        )
 
 
 # ── Main chat (non-streaming) ─────────────────────────────────────────────────

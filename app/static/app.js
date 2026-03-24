@@ -26,14 +26,21 @@
 const state = {
     phase: 'intake',
     turnCount: 0,
-    intakeStep: 1,   // 1–9
+    intakeStep: 1,
     profile: {
-        name: '', gender: '', age: null, profession: '',
-        existing_conditions: '', emergency_contact_name: '',
+        name: '', gender: '', age: null,
+        emergency_contact_name: '',
         emergency_contact_relation: '', emergency_contact_phone: '',
-        mood_score: null, topic: '', country: 'IN',
+    },
+    personality: {
+        prefers_solitude: 'Sometimes',
+        logic_over_emotion: 'Sometimes',
+        plans_ahead: 'Sometimes',
+        energized_by_social: 'Sometimes',
+        trusts_instincts: 'Sometimes'
     },
     sessionId: null,
+    deviceId: localStorage.getItem('device_id') || crypto.randomUUID(),
     history: [],
     sadnessScores: [],
     crisisFlag: false,        // true after suicidal ideation detected
@@ -64,13 +71,10 @@ const dom = {
 // ── Init ───────────────────────────────────────────────────────────────────────
 (function init() {
     // Auto-detect country from timezone
+    localStorage.setItem('device_id', state.deviceId);
     try {
         const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
-        if (tz.includes('Asia/Kolkata') || tz.includes('Asia/Calcutta')) state.profile.country = 'IN';
-        else if (tz.startsWith('America/') && !tz.includes('Toronto') && !tz.includes('Vancouver')) state.profile.country = 'US';
-        else if (tz.startsWith('Europe/London')) state.profile.country = 'UK';
-        else if (tz.startsWith('Australia/')) state.profile.country = 'AU';
-        else if (tz.includes('Toronto') || tz.includes('Vancouver')) state.profile.country = 'CA';
+        // Keeping try/catch but removing country assignment as it's not strictly needed anymore
     } catch (e) { }
 
     // TTS: fix browser autoplay bug — resume synthesis on visibility change
@@ -148,48 +152,26 @@ function handleSend() {
     else handleChatSend(text);
 }
 
-// ── Intake — 9 Steps ───────────────────────────────────────────────────────────
+// ── Intake — 11 Steps ────────────────────────────────────────────────────────
 const INTAKE_STEPS = {
-    // step: { key, next_prompt, next_placeholder, type }
-    1: {
-        save: t => { state.profile.name = t; },
-        next: () => askGender()
-    },
-    2: {
-        save: () => { },  // gender handled by buttons
-        next: () => { }
-    },
-    3: {
-        save: t => { state.profile.age = parseInt(t) || null; },
-        next: () => askProfession()
-    },
-    4: {
-        save: t => { state.profile.profession = t; },
-        next: () => askConditions()
-    },
-    5: {
-        save: t => { state.profile.existing_conditions = t === 'none' || t === 'no' ? 'None' : t; },
-        next: () => askEmergencyName()
-    },
-    6: {
-        save: t => { state.profile.emergency_contact_name = t; },
-        next: () => askEmergencyRelation()
-    },
-    7: {
-        save: t => { state.profile.emergency_contact_relation = t; },
-        next: () => askMood()
-    },
+    1: { save: t => { state.profile.name = t; }, next: () => askGender() },
+    2: { save: () => { }, next: () => { } },
+    3: { save: t => { state.profile.age = parseInt(t) || null; }, next: () => askEmergencyName() },
+    4: { save: t => { state.profile.emergency_contact_name = t; }, next: () => askEmergencyRelation() },
+    5: { save: t => { state.profile.emergency_contact_relation = t; }, next: () => askEmergencyPhone() },
+    6: { save: t => { state.profile.emergency_contact_phone = t; }, next: () => askP1() },
+    7: { save: () => { }, next: () => { } },
+    8: { save: () => { }, next: () => { } },
+    9: { save: () => { }, next: () => { } },
+    10: { save: () => { }, next: () => { } },
+    11: { save: () => { }, next: () => { } },
 };
 
 function handleIntakeSend(text) {
     const step = state.intakeStep;
     appendUserBubble(text);
     disableInput();
-
-    // Save current answer
     if (INTAKE_STEPS[step]) INTAKE_STEPS[step].save(text);
-
-    // Advance to next step
     setTimeout(() => {
         if (INTAKE_STEPS[step]) INTAKE_STEPS[step].next();
     }, 500);
@@ -212,81 +194,102 @@ function askAge() {
     enableInput('Enter your age…');
 }
 
-function askProfession() {
-    state.intakeStep = 4;
-    appendBotBubble('What is your profession or what do you do? (Student, working, etc.)');
-    enableInput('e.g. Software developer, Student…');
-}
-
-function askConditions() {
-    state.intakeStep = 5;
-    appendBotBubble('Do you have any existing physical or mental health conditions I should be aware of? You can type "None" if not.');
-    enableInput('e.g. Anxiety, Diabetes — or type None…');
-}
-
 function askEmergencyName() {
-    state.intakeStep = 6;
+    state.intakeStep = 4;
     appendBotBubble('In case of an emergency, could you share the name of someone we can reach? This stays private and is only used if we need urgent help for you.');
     enableInput('Emergency contact full name…');
 }
 
 function askEmergencyRelation() {
-    state.intakeStep = 7;
+    state.intakeStep = 5;
     appendBotBubble(`What is ${state.profile.emergency_contact_name}'s relationship to you?`);
     appendOptionButtons(['Parent', 'Sibling', 'Partner', 'Friend', 'Other'], val => {
         state.profile.emergency_contact_relation = val;
         appendUserBubble(val);
         disableInput();
-        setTimeout(() => askMood(), 500);
+        setTimeout(() => askEmergencyPhone(), 500);
     });
 }
 
-function askMood() {
-    state.intakeStep = 8;
-    appendBotBubble(`On a scale from 1–10, how are you feeling right now?\n1 = really struggling  ·  10 = doing great`);
-    appendMoodButtons();
+function askEmergencyPhone() {
+    state.intakeStep = 6;
+    appendBotBubble(`Could you share the phone number for ${state.profile.emergency_contact_name}?`);
+    enableInput('Emergency phone number…');
 }
 
-function selectMood(score, buttonRow) {
-    state.profile.mood_score = score;
-    buttonRow.remove();
-    appendUserBubble(`${score} / 10`);
+function processPersonalityVal(questionId, val, nextStepFn) {
+    state.personality[questionId] = val;
+    appendUserBubble(val);
     disableInput();
-    setTimeout(() => {
-        state.intakeStep = 9;
-        appendBotBubble("What's been on your mind lately? No pressure to explain everything — pick what feels closest.");
-        appendTopicButtons();
-        updateSessionSidebar();
-    }, 500);
+    setTimeout(() => nextStepFn(), 500);
 }
 
-const TOPICS = [
-    'Stress & anxiety', 'Feeling lonely', 'Relationship issues',
-    'Work or studies', 'Grief or loss', 'Just need to talk',
-];
+function askP1() {
+    state.intakeStep = 7;
+    appendBotBubble('Do you enjoy spending time alone more than being in large groups?');
+    appendOptionButtons(['Yes', 'No', 'Sometimes'], val => processPersonalityVal('prefers_solitude', val, askP2));
+}
 
-async function selectTopic(topic, buttonRow) {
-    state.profile.topic = topic;
-    buttonRow.remove();
-    appendUserBubble(topic);
+function askP2() {
+    state.intakeStep = 8;
+    appendBotBubble('Do you usually make decisions based on logic rather than emotions?');
+    appendOptionButtons(['Yes', 'No', 'Sometimes'], val => processPersonalityVal('logic_over_emotion', val, askP3));
+}
+
+function askP3() {
+    state.intakeStep = 9;
+    appendBotBubble('Do you like planning things in advance instead of being spontaneous?');
+    appendOptionButtons(['Yes', 'No', 'Sometimes'], val => processPersonalityVal('plans_ahead', val, askP4));
+}
+
+function askP4() {
+    state.intakeStep = 10;
+    appendBotBubble('Do you feel energized after social interactions?');
+    appendOptionButtons(['Yes', 'No', 'Sometimes'], val => processPersonalityVal('energized_by_social', val, askP5));
+}
+
+function askP5() {
+    state.intakeStep = 11;
+    appendBotBubble('Do you often trust your instincts when making important choices?');
+    appendOptionButtons(['Yes', 'No', 'Sometimes'], val => processPersonalityVal('trusts_instincts', val, completeAssessment));
+}
+
+async function completeAssessment() {
     disableInput('Just a moment…');
     updateSessionSidebar();
-    updateMoodBar();
     showTyping();
 
     try {
-        const res = await fetch('/api/chat/opening', {
+        const payload = {
+            device_id: state.deviceId,
+            profile: {
+                name: state.profile.name,
+                gender: state.profile.gender,
+                age: state.profile.age,
+                emergency_contact_name: state.profile.emergency_contact_name,
+                emergency_contact_relation: state.profile.emergency_contact_relation,
+                emergency_contact_phone: state.profile.emergency_contact_phone
+            },
+            personality_answers: state.personality
+        };
+
+        const res = await fetch('/api/assessment', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(state.profile),
+            body: JSON.stringify(payload),
         });
         const data = await res.json();
+        
+        // Use the session ID generated by the backend
         state.sessionId = data.session_id;
+        
         hideTyping();
-        appendBotBubble(data.message);
+        appendBotBubble(data.opening_message);
     } catch (err) {
         hideTyping();
         appendBotBubble("Something went wrong on my end — but I'm here. What's been going on?");
+        // Generate a fallback session id if backend failed
+        state.sessionId = crypto.randomUUID(); 
     }
 
     state.phase = 'chat';
@@ -316,10 +319,8 @@ async function handleChatSend(text) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 session_id: state.sessionId,
+                device_id: state.deviceId,
                 message: text,
-                profile: profileWithFlags,
-                history: state.history.slice(-40),
-                sadness_scores: state.sadnessScores,
             }),
         });
 

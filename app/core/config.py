@@ -45,9 +45,9 @@ class Settings(BaseSettings):
     HF_API_TOKEN:     str = ""   # only needed for HF Inference API fallback
 
     # ── Session / History ─────────────────────────────────────────────────────
-    # 15 turns = ~30 messages = sufficient for full emotional arc
-    # 20 turns consumed too many context tokens with long system prompts
-    MAX_HISTORY_TURNS: int = 15
+    # 50 turns = ~100 messages. GPT-4o has 128K context — use it.
+    # This gives the AI full conversation memory, like ChatGPT.
+    MAX_HISTORY_TURNS: int = 50
 
     # ── Token ceiling ─────────────────────────────────────────────────────────
     # llm.py overrides this dynamically per message class.

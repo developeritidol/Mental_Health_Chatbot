@@ -18,6 +18,8 @@ from app.services.db_service import (
     get_user_profile,
     get_formatted_history,
     save_message,
+    generate_embedding,
+    retrieve_long_term_memory,
 )
 from app.core.logger import get_logger
 
@@ -84,9 +86,18 @@ async def stream_message(req: StreamChatRequest):
     logger.info(f"[USER]:  {req.message}")
     logger.info("═" * 70)
 
-    # 3. Save user message to DB
+    # 3. Generate embedding and retrieve long-term memory (RAG)
+    query_vector = await generate_embedding(req.message)
+    long_term_memory = await retrieve_long_term_memory(
+        device_id=req.device_id,
+        query_vector=query_vector,
+        exclude_session_id=req.session_id,
+    )
+
+    # 4. Save user message to DB (embedding is stored inside save_message automatically)
     await save_message({
         "session_id": req.session_id,
+        "device_id": req.device_id,
         "turn_number": turn_count + 1,
         "role": "user",
         "content": req.message,
@@ -126,7 +137,7 @@ async def stream_message(req: StreamChatRequest):
         logger.error(f"[STEP 2 ERROR] {e}")
         consensus = _safe_fallback_consensus()
 
-    # 6. Stream response
+    # 6. Stream response with long-term memory injected
     async def generate():
         full_reply = []
         try:
@@ -135,6 +146,7 @@ async def stream_message(req: StreamChatRequest):
                 profile=profile,
                 history=history,
                 consensus=consensus,
+                long_term_memory=long_term_memory,
             ):
                 full_reply.append(chunk)
                 yield f"data: {json.dumps({'chunk': chunk})}\n\n"
@@ -161,6 +173,7 @@ async def stream_message(req: StreamChatRequest):
 
             await save_message({
                 "session_id": req.session_id,
+                "device_id": req.device_id,
                 "turn_number": turn_count + 1,
                 "role": "assistant",
                 "content": final,

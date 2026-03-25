@@ -1,9 +1,89 @@
 import logging
 from typing import List, Dict, Optional
 from datetime import datetime
+from openai import AsyncOpenAI
 from app.core.database import get_database
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
+
+
+# ── Embeddings ────────────────────────────────────────────────────────────────
+
+async def generate_embedding(text: str) -> List[float]:
+    """
+    Converts text into a 1536-dimensional vector using OpenAI's
+    text-embedding-3-small model. This is the cheapest, fastest model
+    and is more than sufficient for RAG chat retrieval.
+    Returns empty list on failure (embedding is non-critical).
+    """
+    try:
+        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        response = await client.embeddings.create(
+            input=text,
+            model="text-embedding-3-small",
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        logger.error(f"Embedding generation failed: {e}")
+        return []
+
+
+async def retrieve_long_term_memory(
+    device_id: str,
+    query_vector: List[float],
+    exclude_session_id: str = "",
+    limit: int = 4,
+) -> List[str]:
+    """
+    Searches ALL past messages belonging to this device_id using a
+    cosine-similarity $vectorSearch on MongoDB Atlas.
+    Returns plain-text snippets of the most relevant past turns.
+    Returns empty list on failure or if no index exists yet.
+    """
+    if not query_vector:
+        return []
+
+    db = get_database()
+    if db is None:
+        return []
+
+    try:
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "index": "messages_vector_index",
+                    "path": "embedding",
+                    "queryVector": query_vector,
+                    "numCandidates": 50,
+                    "limit": limit + 2,  # fetch extra to allow exclusion filter
+                    "filter": {"device_id": device_id},
+                }
+            },
+            # Exclude current session to avoid echo chamber
+            {"$match": {"session_id": {"$ne": exclude_session_id}}},
+            {"$limit": limit},
+            {"$project": {"role": 1, "content": 1, "_id": 0}},
+        ]
+        cursor = db.messages.aggregate(pipeline)
+        docs = await cursor.to_list(length=limit)
+
+        snippets = []
+        for doc in docs:
+            role = "User" if doc.get("role") == "user" else "MindBridge"
+            content = doc.get("content", "")[:200].strip()
+            if content:
+                snippets.append(f"{role}: {content}")
+
+        if snippets:
+            logger.info(f"Long-term memory: {len(snippets)} relevant past turns retrieved for {device_id}")
+        return snippets
+
+    except Exception as e:
+        # Graceful fallback — if no vector index exists yet, just skip
+        logger.warning(f"Vector search unavailable (index may not exist yet): {e}")
+        return []
 
 
 # ── Personality conversion ────────────────────────────────────────────────────
@@ -121,13 +201,18 @@ async def create_session(session_data: dict) -> bool:
 # ── Messages ──────────────────────────────────────────────────────────────────
 
 async def save_message(message_data: dict) -> bool:
-    """Saves a single message (user or assistant) to MongoDB."""
+    """
+    Saves a single message (user or assistant) to MongoDB.
+    For user messages, also generates and stores an embedding vector
+    for long-term memory retrieval (RAG).
+    """
     db = get_database()
     if db is None:
         return False
 
     doc = {
         "session_id": message_data.get("session_id"),
+        "device_id": message_data.get("device_id"),  # Required for vector search filtering
         "turn_number": message_data.get("turn_number", 0),
         "role": message_data.get("role"),
         "content": message_data.get("content"),
@@ -138,6 +223,12 @@ async def save_message(message_data: dict) -> bool:
         doc["roberta_analysis"] = message_data["roberta_analysis"]
     if "llm_consensus" in message_data:
         doc["llm_consensus"] = message_data["llm_consensus"]
+
+    # Generate and store embedding for user messages only (for RAG retrieval)
+    if message_data.get("role") == "user" and message_data.get("content"):
+        embedding = await generate_embedding(message_data["content"])
+        if embedding:
+            doc["embedding"] = embedding
 
     try:
         await db.messages.insert_one(doc)

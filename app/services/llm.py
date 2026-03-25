@@ -127,6 +127,7 @@ def build_system_prompt(
     conversation_so_far: Optional[list] = None,
     user_message: str = "",
     consensus: Optional[dict] = None,
+    long_term_memory: Optional[list] = None,
 ) -> tuple[str, int]:
     """
     Returns (system_prompt: str, token_budget: int).
@@ -273,6 +274,15 @@ def build_system_prompt(
     # ── Anti-repetition (reduced to last 1 only) ─────────────────────────────
     anti_rep = _extract_bot_last_opening(conversation_so_far)
 
+    # ── Long-term memory (RAG) ────────────────────────────────────────────────
+    memory_section = ""
+    if long_term_memory:
+        formatted = "\n".join(f"  - {m}" for m in long_term_memory)
+        memory_section = (
+            f"\nRelevant moments from past conversations with {name}:\n{formatted}\n"
+            f"Use this only if it naturally connects to what they're saying now. Don't force it.\n"
+        )
+
     # ─────────────────────────────────────────────────────────────────────────
     # FULL PROMPT — v5: Identity-first, lean, trusts GPT-4o
     # ─────────────────────────────────────────────────────────────────────────
@@ -300,6 +310,7 @@ You are talking with {name}. {f"Gender: {gender}. " if gender else ""}{f"Age: {a
 
 {personalization}
 {emotion_arc_section}
+{memory_section}
 {crisis_followup}
 {crisis_repeat_note}
 
@@ -422,10 +433,12 @@ async def chat_stream(
     profile: dict,
     history: list[dict],
     consensus: Optional[dict] = None,
+    long_term_memory: Optional[list] = None,
 ) -> AsyncIterator[str]:
     client = _get_client()
     system_prompt, token_budget = build_system_prompt(
-        profile, history, user_message=user_message, consensus=consensus
+        profile, history, user_message=user_message, consensus=consensus,
+        long_term_memory=long_term_memory,
     )
 
     messages = history[-(settings.MAX_HISTORY_TURNS * 2):]

@@ -1,10 +1,9 @@
 """
 Chat Route
 ──────────
-POST /api/chat/stream — SSE streaming chat for Android.
-
+POST /api/chat/stream — SSE streaming chat.
 Android sends only: session_id, device_id, message.
-Server loads profile and history from MongoDB.
+Server loads profile and full history from MongoDB.
 """
 
 import json
@@ -29,7 +28,6 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _build_recent_history_string(history: list[dict], n_turns: int = 4) -> str:
-    """Plain text of recent turns for the consensus synthesizer."""
     if not history:
         return ""
     recent = history[-(n_turns * 2):]
@@ -43,7 +41,6 @@ def _build_recent_history_string(history: list[dict], n_turns: int = 4) -> str:
 
 
 def _safe_fallback_consensus() -> dict:
-    """Fallback when synthesizer fails."""
     return {
         "llm_sentiment":    "neutral",
         "category":         "general",
@@ -62,8 +59,9 @@ def _safe_fallback_consensus() -> dict:
 @router.post("/stream")
 async def stream_message(req: StreamChatRequest):
     """
-    Main chat endpoint. Android sends session_id + device_id + message.
-    Server handles everything: profile lookup, history, emotion, consensus, LLM.
+    Main chat endpoint for Android.
+    Android sends: session_id + device_id + message.
+    Server loads profile and history from MongoDB automatically.
     """
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
@@ -95,6 +93,7 @@ async def stream_message(req: StreamChatRequest):
     })
 
     # 4. RoBERTa emotion analysis
+    emotion_result = None
     try:
         logger.info("[STEP 1] RoBERTa emotion analysis...")
         emotion_result = await emotion_svc.analyse(
@@ -108,7 +107,6 @@ async def stream_message(req: StreamChatRequest):
             )
     except Exception as e:
         logger.error(f"[STEP 1 ERROR] {e}")
-        emotion_result = None
 
     sadness_now = emotion_result.scores.get("sadness", 0.0) if emotion_result else 0.0
 
@@ -119,23 +117,14 @@ async def stream_message(req: StreamChatRequest):
             text=req.message,
             roberta_emotion=emotion_result.dominant if emotion_result else "neutral",
             roberta_score=sadness_now,
-            recent_history=recent_history_str,
-            turn_count=turn_count,
         )
         logger.info(
-            f"[STEP 2 OK] class: {consensus.get('message_class')} | "
-            f"tokens: {consensus.get('token_budget')} | "
-            f"intensity: {consensus.get('intensity')} | "
-            f"crisis: {consensus.get('is_crisis')}"
+            f"[STEP 2 OK] crisis: {consensus.get('is_crisis')} | "
+            f"category: {consensus.get('category')}"
         )
     except Exception as e:
         logger.error(f"[STEP 2 ERROR] {e}")
         consensus = _safe_fallback_consensus()
-
-    logger.info(
-        f"[STEP 3] LLM Generator — class: {consensus.get('message_class')} | "
-        f"budget: {consensus.get('token_budget')} tokens"
-    )
 
     # 6. Stream response
     async def generate():
@@ -150,20 +139,18 @@ async def stream_message(req: StreamChatRequest):
                 full_reply.append(chunk)
                 yield f"data: {json.dumps({'chunk': chunk})}\n\n"
 
-            # Final SSE event with metadata
+            # Final SSE event with emotion metadata
             emotion_dict = {
                 "dominant_emotion":  emotion_result.dominant if emotion_result else "neutral",
                 "response_mode":     consensus.get("category", "general"),
-                "message_class":     consensus.get("message_class", "emotional_ongoing"),
                 "intensity":         consensus.get("intensity", "moderate"),
-                "recommended_tone":  consensus.get("recommended_tone", "validating"),
                 "is_crisis_signal":  consensus.get("is_crisis", False),
             }
             yield f"data: {json.dumps({'done': True, 'emotion': emotion_dict})}\n\n"
 
             # Save AI response to DB
             final = "".join(full_reply)
-            logger.info(f"[STEP 3 OK] {len(final)} chars")
+            logger.info(f"[STEP 3 OK] {len(final)} chars streamed")
 
             roberta_doc = None
             if emotion_result:

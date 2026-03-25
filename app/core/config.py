@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     SYNTHESIZER_MODEL: str = "gpt-4o-mini"
 
     # ── Groq Whisper (STT) ───────────────────────────────────────────────────
+    GROQ_API_KEY: str = ""
     GROQ_WHISPER_MODEL: str = "whisper-large-v3"
 
     # ── HuggingFace Emotion Model ─────────────────────────────────────────────

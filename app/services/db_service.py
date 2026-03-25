@@ -224,8 +224,8 @@ async def save_message(message_data: dict) -> bool:
     if "llm_consensus" in message_data:
         doc["llm_consensus"] = message_data["llm_consensus"]
 
-    # Generate and store embedding for user messages only (for RAG retrieval)
-    if message_data.get("role") == "user" and message_data.get("content"):
+    # Generate and store embedding for ALL messages (user + AI) for full RAG retrieval
+    if message_data.get("content"):
         embedding = await generate_embedding(message_data["content"])
         if embedding:
             doc["embedding"] = embedding

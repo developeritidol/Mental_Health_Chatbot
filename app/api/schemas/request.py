@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Optional
+from datetime import datetime
 
 
 # ── Assessment API schemas ────────────────────────────────────────────────────
@@ -37,3 +38,4 @@ class StreamChatRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
     device_id: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1, max_length=2000)
+    timestamp: Optional[datetime] = Field(default=None, description="Optional device-side timestamp of the message")

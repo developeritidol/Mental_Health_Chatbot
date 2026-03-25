@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime
 
 
 # ── Assessment response ───────────────────────────────────────────────────────
@@ -8,6 +9,7 @@ class AssessmentResponse(BaseModel):
     status: str
     session_id: str
     opening_message: str
+    timestamp: datetime
     device_id: str
 
 

@@ -6,6 +6,7 @@ Saves profile + personality, creates session, returns opening message.
 """
 
 import uuid
+from datetime import datetime
 from fastapi import APIRouter, HTTPException
 
 from app.api.schemas.request import AssessmentRequest
@@ -76,5 +77,6 @@ async def submit_assessment(req: AssessmentRequest):
         status="success",
         session_id=session_id,
         opening_message=opening,
+        timestamp=datetime.utcnow(),
         device_id=req.device_id,
     )

@@ -7,10 +7,12 @@ Server loads profile and full history from MongoDB.
 """
 
 import json
+from datetime import datetime
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.api.schemas.request import StreamChatRequest
+from app.api.schemas.response import ChatHistoryResponse, ChatMessageResponse
 from app.services import emotion as emotion_svc
 from app.services import llm as llm_svc
 from app.services.safety import synthesize_consensus
@@ -20,6 +22,7 @@ from app.services.db_service import (
     save_message,
     generate_embedding,
     retrieve_long_term_memory,
+    get_all_user_messages,
 )
 from app.core.logger import get_logger
 
@@ -151,14 +154,19 @@ async def stream_message(req: StreamChatRequest):
                 full_reply.append(chunk)
                 yield f"data: {json.dumps({'chunk': chunk})}\n\n"
 
-            # Final SSE event with emotion metadata
+            # Final SSE event with emotion metadata and timestamp
             emotion_dict = {
                 "dominant_emotion":  emotion_result.dominant if emotion_result else "neutral",
                 "response_mode":     consensus.get("category", "general"),
                 "intensity":         consensus.get("intensity", "moderate"),
                 "is_crisis_signal":  consensus.get("is_crisis", False),
             }
-            yield f"data: {json.dumps({'done': True, 'emotion': emotion_dict})}\n\n"
+            done_payload = {
+                "done": True,
+                "timestamp": datetime.utcnow().isoformat(),
+                "emotion": emotion_dict
+            }
+            yield f"data: {json.dumps(done_payload)}\n\n"
 
             # Save AI response to DB
             final = "".join(full_reply)
@@ -191,4 +199,32 @@ async def stream_message(req: StreamChatRequest):
         generate(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── Chat History API ──────────────────────────────────────────────────────────
+
+@router.get("/history/{device_id}", response_model=ChatHistoryResponse)
+async def get_chat_history(device_id: str):
+    """
+    Returns ALL past conversation messages across all sessions
+    for a specific device_id, sorted chronologically.
+    Used by Android when the app is reopened to restore chat context.
+    """
+    if not device_id.strip():
+        raise HTTPException(status_code=400, detail="Device ID is required.")
+
+    messages = await get_all_user_messages(device_id)
+    
+    # Map raw dictionary to strongly-typed Pydantic model
+    formatted_messages = [
+        ChatMessageResponse(**msg) 
+        for msg in messages
+    ]
+
+    return ChatHistoryResponse(
+        status="success",
+        device_id=device_id,
+        total_messages=len(formatted_messages),
+        messages=formatted_messages
     )

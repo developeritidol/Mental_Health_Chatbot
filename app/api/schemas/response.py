@@ -25,6 +25,22 @@ class EmotionData(BaseModel):
     sadness_scores: list[float] = []
 
 
+# ── Chat history API ─────────────────────────────────────────────────────────
+
+class ChatMessageResponse(BaseModel):
+    session_id: str
+    role: str
+    content: str
+    timestamp: datetime
+
+
+class ChatHistoryResponse(BaseModel):
+    status: str
+    device_id: str
+    total_messages: int
+    messages: list[ChatMessageResponse]
+
+
 # ── Health / utility ──────────────────────────────────────────────────────────
 
 class TranscriptionResponse(BaseModel):

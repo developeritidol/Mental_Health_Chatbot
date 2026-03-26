@@ -262,3 +262,37 @@ async def get_formatted_history(session_id: str, limit: int = 100) -> List[Dict[
     except Exception as e:
         logger.error(f"Failed to fetch history for {session_id}: {e}")
         return []
+
+
+async def get_all_user_messages(device_id: str) -> List[Dict]:
+    """
+    Retrieves ALL past messages for a given device_id across all sessions.
+    Returns them sorted chronologically (oldest to newest) to rebuild the UI.
+    """
+    db = get_database()
+    if db is None:
+        logger.warning(f"DB not connected, returning empty history for {device_id}")
+        return []
+
+    try:
+        # Sort by timestamp ascending (1) to show oldest first in UI
+        cursor = db.messages.find({"device_id": device_id}).sort("timestamp", 1)
+        docs = await cursor.to_list(length=None)  # fetch all
+        
+        # Format for the response schema
+        formatted = []
+        for doc in docs:
+            # Only return messages that have content
+            if doc.get("content"):
+                formatted.append({
+                    "session_id": doc.get("session_id", "unknown"),
+                    "role": doc.get("role", "unknown"),
+                    "content": doc.get("content", ""),
+                    "timestamp": doc.get("timestamp"),
+                })
+        
+        logger.info(f"Fetched {len(formatted)} total historical messages for {device_id}")
+        return formatted
+    except Exception as e:
+        logger.error(f"Failed to fetch all messages for {device_id}: {e}")
+        return []

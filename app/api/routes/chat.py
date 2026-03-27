@@ -7,7 +7,7 @@ Server loads profile and full history from MongoDB.
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
@@ -163,7 +163,7 @@ async def stream_message(req: StreamChatRequest):
             }
             done_payload = {
                 "done": True,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "emotion": emotion_dict
             }
             yield f"data: {json.dumps(done_payload)}\n\n"

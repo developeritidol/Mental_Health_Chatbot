@@ -1,6 +1,6 @@
 import logging
 from typing import List, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from openai import AsyncOpenAI
 from app.core.database import get_database
 from app.core.config import get_settings
@@ -128,13 +128,13 @@ async def upsert_user_profile(device_id: str, profile: dict, personality_answers
         },
         "personality_answers": personality_answers,
         "personality_summary": personality_summary,
-        "last_active": datetime.utcnow(),
+        "last_active": datetime.now(timezone.utc),
     }
 
     try:
         await db.users.update_one(
             {"device_id": device_id},
-            {"$set": update_doc, "$setOnInsert": {"created_at": datetime.utcnow()}},
+            {"$set": update_doc, "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
             upsert=True,
         )
         logger.info(f"Profile saved for device {device_id}: {personality_summary}")
@@ -188,8 +188,8 @@ async def create_session(session_data: dict) -> bool:
             "device_id": session_data["device_id"],
             "is_active": True,
             "lethality_alert": False,
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
         }
         await db.sessions.insert_one(doc)
         return True
@@ -216,7 +216,7 @@ async def save_message(message_data: dict) -> bool:
         "turn_number": message_data.get("turn_number", 0),
         "role": message_data.get("role"),
         "content": message_data.get("content"),
-        "timestamp": datetime.utcnow(),
+        "timestamp": datetime.now(timezone.utc),
     }
 
     if "roberta_analysis" in message_data:
@@ -234,7 +234,7 @@ async def save_message(message_data: dict) -> bool:
         await db.messages.insert_one(doc)
         await db.sessions.update_one(
             {"session_id": message_data.get("session_id")},
-            {"$set": {"updated_at": datetime.utcnow()}},
+            {"$set": {"updated_at": datetime.now(timezone.utc)}},
         )
         return True
     except Exception as e:

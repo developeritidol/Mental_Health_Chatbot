@@ -51,6 +51,11 @@ async def transcribe_audio(file: UploadFile = File(...)):
         language = getattr(transcription, "language", None)
         duration = getattr(transcription, "duration", None)
 
+        # ✨ NEW: Only allow English input. If another language is detected, wipe the text!
+        if language and language.lower() not in ["english", "en"]:
+            logger.warning(f"Rejected non-English audio. Detected: {language}")
+            text = ""
+
         logger.debug(f"Whisper transcript: '{text[:60]}...' lang={language}")
         logger.info("Transcription successful")
 

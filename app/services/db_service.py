@@ -188,6 +188,7 @@ async def create_session(session_data: dict) -> bool:
             "device_id": session_data["device_id"],
             "is_active": True,
             "lethality_alert": False,
+            "is_escalated": False,          # True once handed off to a human
             "created_at": datetime.now(timezone.utc),
             "updated_at": datetime.now(timezone.utc),
         }
@@ -195,6 +196,73 @@ async def create_session(session_data: dict) -> bool:
         return True
     except Exception as e:
         logger.error(f"Failed to create session: {e}")
+        return False
+
+
+async def escalate_session(session_id: str) -> bool:
+    """
+    Marks a session as escalated to a human operator.
+    Called immediately when safety.py detects is_crisis == True.
+    """
+    db = get_database()
+    if db is None:
+        return False
+    try:
+        await db.sessions.update_one(
+            {"session_id": session_id},
+            {"$set": {
+                "is_escalated": True,
+                "escalated_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }},
+        )
+        logger.warning(f"[ESCALATION] Session {session_id} handed off to human operator.")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to escalate session {session_id}: {e}")
+        return False
+
+
+async def close_escalation(session_id: str) -> bool:
+    """
+    Marks a session as no longer escalated.
+    Called by the human counselor when they click 'End Session'.
+    After this, the user's next message will go back to the AI.
+    """
+    db = get_database()
+    if db is None:
+        return False
+    try:
+        await db.sessions.update_one(
+            {"session_id": session_id},
+            {"$set": {
+                "is_escalated": False,
+                "escalation_closed_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }},
+        )
+        logger.info(f"[ESCALATION CLOSED] Session {session_id} returned to AI mode.")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to close escalation for {session_id}: {e}")
+        return False
+
+
+async def is_session_escalated(session_id: str) -> bool:
+    """
+    Checks whether a session is currently under human control.
+    Used by chat.py to block AI responses during active human intervention.
+    """
+    db = get_database()
+    if db is None:
+        return False
+    try:
+        doc = await db.sessions.find_one({"session_id": session_id})
+        if doc and doc.get("is_escalated") is True:
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Failed to check escalation status for {session_id}: {e}")
         return False
 
 
@@ -264,25 +332,22 @@ async def get_formatted_history(session_id: str, limit: int = 100) -> List[Dict[
         return []
 
 
-async def get_all_user_messages(device_id: str) -> List[Dict]:
+async def get_session_messages(session_id: str) -> List[Dict]:
     """
-    Retrieves ALL past messages for a given device_id across all sessions.
+    Retrieves ALL messages for a given session_id.
     Returns them sorted chronologically (oldest to newest) to rebuild the UI.
     """
     db = get_database()
     if db is None:
-        logger.warning(f"DB not connected, returning empty history for {device_id}")
+        logger.warning(f"DB not connected, returning empty history for session {session_id}")
         return []
 
     try:
-        # Sort by timestamp ascending (1) to show oldest first in UI
-        cursor = db.messages.find({"device_id": device_id}).sort("timestamp", 1)
-        docs = await cursor.to_list(length=None)  # fetch all
-        
-        # Format for the response schema
+        cursor = db.messages.find({"session_id": session_id}).sort("timestamp", 1)
+        docs = await cursor.to_list(length=None)
+
         formatted = []
         for doc in docs:
-            # Only return messages that have content
             if doc.get("content"):
                 formatted.append({
                     "session_id": doc.get("session_id", "unknown"),
@@ -290,9 +355,71 @@ async def get_all_user_messages(device_id: str) -> List[Dict]:
                     "content": doc.get("content", ""),
                     "timestamp": doc.get("timestamp"),
                 })
-        
-        logger.info(f"Fetched {len(formatted)} total historical messages for {device_id}")
+
+        logger.info(f"Fetched {len(formatted)} messages for session {session_id}")
         return formatted
     except Exception as e:
-        logger.error(f"Failed to fetch all messages for {device_id}: {e}")
+        logger.error(f"Failed to fetch messages for session {session_id}: {e}")
+        return []
+
+
+async def get_all_sessions(device_id: str) -> List[Dict]:
+    """
+    Retrieves ALL sessions for a given device_id.
+    Returns them sorted by creation time (newest first).
+    """
+    db = get_database()
+    if db is None:
+        logger.warning(f"DB not connected, returning empty sessions for {device_id}")
+        return []
+
+    try:
+        cursor = db.sessions.find({"device_id": device_id}).sort("created_at", -1)
+        docs = await cursor.to_list(length=None)
+
+        sessions = []
+        for doc in docs:
+            sessions.append({
+                "session_id": doc.get("session_id"),
+                "device_id": doc.get("device_id"),
+                "is_active": doc.get("is_active", False),
+                "is_escalated": doc.get("is_escalated", False),
+                "created_at": doc.get("created_at"),
+                "updated_at": doc.get("updated_at"),
+            })
+
+        logger.info(f"Fetched {len(sessions)} sessions for device {device_id}")
+        return sessions
+    except Exception as e:
+        logger.error(f"Failed to fetch sessions for {device_id}: {e}")
+        return []
+
+
+async def get_escalated_sessions() -> List[Dict]:
+    """
+    Retrieves ALL sessions that have been escalated (is_escalated == True).
+    Used by the Human Admin Dashboard to see which users need help.
+    """
+    db = get_database()
+    if db is None:
+        return []
+
+    try:
+        cursor = db.sessions.find({"is_escalated": True}).sort("escalated_at", -1)
+        docs = await cursor.to_list(length=None)
+
+        sessions = []
+        for doc in docs:
+            sessions.append({
+                "session_id": doc.get("session_id"),
+                "device_id": doc.get("device_id"),
+                "is_escalated": True,
+                "escalated_at": doc.get("escalated_at"),
+                "created_at": doc.get("created_at"),
+            })
+
+        logger.info(f"Found {len(sessions)} escalated sessions awaiting human response.")
+        return sessions
+    except Exception as e:
+        logger.error(f"Failed to fetch escalated sessions: {e}")
         return []

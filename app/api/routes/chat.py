@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.api.schemas.request import StreamChatRequest
-from app.api.schemas.response import ChatHistoryResponse, ChatMessageResponse
+from app.api.schemas.response import ChatHistoryResponse, ChatMessageResponse, SessionListResponse, SessionResponse
 from app.services import emotion as emotion_svc
 from app.services import llm as llm_svc
 from app.services.safety import synthesize_consensus
@@ -22,7 +22,10 @@ from app.services.db_service import (
     save_message,
     generate_embedding,
     retrieve_long_term_memory,
-    get_all_user_messages,
+    get_session_messages,
+    get_all_sessions,
+    escalate_session,
+    is_session_escalated,
 )
 from app.core.logger import get_logger
 
@@ -77,6 +80,30 @@ async def stream_message(req: StreamChatRequest):
         raise HTTPException(
             status_code=404,
             detail="Profile not found. Complete assessment first.",
+        )
+
+    # 1b. Guard: If this session is currently escalated to a human,
+    #     block AI and redirect Android back to the WebSocket.
+    if await is_session_escalated(req.session_id):
+        from app.core.config import get_settings
+        _settings = get_settings()
+        ws_url = f"ws://{_settings.SERVER_HOST}:{_settings.SERVER_PORT}/ws/human/{req.session_id}"
+
+        redirect_payload = {
+            "done": True,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "type": "escalation_active",
+            "handoff_message": "You are currently connected to a human counselor. Please continue in the live chat.",
+            "websocket_url": ws_url,
+        }
+
+        async def _redirect_stream():
+            yield f"data: {json.dumps(redirect_payload)}\n\n"
+
+        return StreamingResponse(
+            _redirect_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     # 2. Load full conversation history from DB
@@ -140,7 +167,37 @@ async def stream_message(req: StreamChatRequest):
         logger.error(f"[STEP 2 ERROR] {e}")
         consensus = _safe_fallback_consensus()
 
-    # 6. Stream response with long-term memory injected
+    # ── STEP 6: Crisis fork — stop AI, hand off to human ──────────────────────
+    if consensus.get("is_crisis") is True:
+        logger.warning(f"[ESCALATION] Crisis detected for session {req.session_id}. Blocking AI and routing to human.")
+        await escalate_session(req.session_id)
+
+        from app.core.config import get_settings
+        _settings = get_settings()
+        ws_url = f"ws://{_settings.SERVER_HOST}:{_settings.SERVER_PORT}/ws/human/{req.session_id}"
+
+        handoff_payload = {
+            "done": True,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "type": "escalation_required",
+            "handoff_message": (
+                "I can hear how much pain you're in right now. "
+                "I'm connecting you to a human crisis counselor immediately — "
+                "you don't have to face this alone."
+            ),
+            "websocket_url": ws_url,
+        }
+
+        async def _handoff_stream():
+            yield f"data: {json.dumps(handoff_payload)}\n\n"
+
+        return StreamingResponse(
+            _handoff_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # ── STEP 7: Normal AI stream ───────────────────────────────────────────────
     async def generate():
         full_reply = []
         try:
@@ -202,29 +259,53 @@ async def stream_message(req: StreamChatRequest):
     )
 
 
-# ── Chat History API ──────────────────────────────────────────────────────────
+# ── Chat History API (by session_id) ──────────────────────────────────────────
 
-@router.get("/history/{device_id}", response_model=ChatHistoryResponse)
-async def get_chat_history(device_id: str):
+@router.get("/history/{session_id}", response_model=ChatHistoryResponse)
+async def get_chat_history(session_id: str):
     """
-    Returns ALL past conversation messages across all sessions
-    for a specific device_id, sorted chronologically.
-    Used by Android when the app is reopened to restore chat context.
+    Returns ALL messages for a specific session_id, sorted chronologically.
+    Used by Android to load conversation history when opening a session.
     """
-    if not device_id.strip():
-        raise HTTPException(status_code=400, detail="Device ID is required.")
+    if not session_id.strip():
+        raise HTTPException(status_code=400, detail="Session ID is required.")
 
-    messages = await get_all_user_messages(device_id)
-    
-    # Map raw dictionary to strongly-typed Pydantic model
+    messages = await get_session_messages(session_id)
+
     formatted_messages = [
-        ChatMessageResponse(**msg) 
+        ChatMessageResponse(**msg)
         for msg in messages
     ]
 
     return ChatHistoryResponse(
         status="success",
-        device_id=device_id,
+        session_id=session_id,
         total_messages=len(formatted_messages),
-        messages=formatted_messages
+        messages=formatted_messages,
     )
+
+
+# ── Sessions List API (by device_id) ─────────────────────────────────────────
+
+@router.get("/sessions/{device_id}", response_model=SessionListResponse)
+async def get_device_sessions(device_id: str):
+    """
+    Returns ALL sessions for a specific device_id, sorted newest first.
+    Used by Android to list all past conversations when the app is reopened.
+    """
+    if not device_id.strip():
+        raise HTTPException(status_code=400, detail="Device ID is required.")
+
+    sessions = await get_all_sessions(device_id)
+
+    formatted_sessions = [
+        SessionResponse(**s)
+        for s in sessions
+    ]
+
+    return SessionListResponse(
+        status="success",
+        device_id=device_id,
+        total_sessions=len(formatted_sessions),
+        sessions=formatted_sessions,
+    )

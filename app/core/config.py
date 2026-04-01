@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     # This value is a safety fallback ONLY — never used for normal chat flow.
     MAX_TOKENS: int = 300
 
+    # ── Server address (used to build WebSocket URLs) ─────────────────────────
+    SERVER_HOST: str = "localhost"
+    SERVER_PORT: int = 8000
+
     class Config:
         env_file          = ".env"
         env_file_encoding = "utf-8"

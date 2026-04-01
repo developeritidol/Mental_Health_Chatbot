@@ -36,9 +36,43 @@ class ChatMessageResponse(BaseModel):
 
 class ChatHistoryResponse(BaseModel):
     status: str
-    device_id: str
+    session_id: str
     total_messages: int
     messages: list[ChatMessageResponse]
+
+
+# ── Session list API ─────────────────────────────────────────────────────────
+
+class SessionResponse(BaseModel):
+    session_id: str
+    device_id: str
+    is_active: bool
+    is_escalated: bool
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class SessionListResponse(BaseModel):
+    status: str
+    device_id: str
+    total_sessions: int
+    sessions: list[SessionResponse]
+
+
+# ── Human intervention API ───────────────────────────────────────────────────
+
+class EscalatedSessionResponse(BaseModel):
+    session_id: str
+    device_id: str
+    is_escalated: bool
+    escalated_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+
+class EscalatedSessionListResponse(BaseModel):
+    status: str
+    total: int
+    sessions: list[EscalatedSessionResponse]
 
 
 # ── Health / utility ──────────────────────────────────────────────────────────

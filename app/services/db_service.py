@@ -118,7 +118,9 @@ async def upsert_user_profile(device_id: str, profile: dict, personality_answers
     personality_summary = build_personality_summary(personality_answers)
 
     update_doc = {
-        "name": profile.get("name", ""),
+        "first_name": profile.get("first_name", ""),
+        "last_name": profile.get("last_name"),
+        "username": profile.get("username"),
         "gender": profile.get("gender"),
         "age": profile.get("age"),
         "emergency_contact": {
@@ -161,7 +163,7 @@ async def get_user_profile(device_id: str) -> Optional[dict]:
         ec = doc.get("emergency_contact", {}) or {}
         return {
             "device_id": device_id,
-            "name": doc.get("name", "Friend"),
+            "name": f"{doc.get('first_name', 'Friend')} {doc.get('last_name', '')}".strip() or "Friend",
             "gender": doc.get("gender", ""),
             "age": doc.get("age"),
             "personality_summary": doc.get("personality_summary", "Not provided"),
@@ -425,13 +427,57 @@ async def get_escalated_sessions() -> List[Dict]:
     """
     Retrieves ALL sessions that have been escalated (is_escalated == True).
     Used by the Human Admin Dashboard to see which users need help.
+    Joins the users collection to fetch the user's name.
     """
     db = get_database()
     if db is None:
         return []
 
     try:
-        cursor = db.sessions.find({"is_escalated": True}).sort("escalated_at", -1)
+        pipeline = [
+            {"$match": {"is_escalated": True}},
+            {"$sort": {"escalated_at": -1}},
+            {
+                "$lookup": {
+                    "from": "users",
+                    "localField": "device_id",
+                    "foreignField": "device_id",
+                    "as": "user_info"
+                }
+            },
+            {
+                "$addFields": {
+                    "first_name": {
+                        "$cond": {
+                            "if": {"$gt": [{"$size": "$user_info"}, 0]},
+                            "then": {"$arrayElemAt": ["$user_info.first_name", 0]},
+                            "else": "Unknown"
+                        }
+                    },
+                    "last_name": {
+                        "$cond": {
+                            "if": {"$gt": [{"$size": "$user_info"}, 0]},
+                            "then": {"$arrayElemAt": ["$user_info.last_name", 0]},
+                            "else": None
+                        }
+                    },
+                    "username": {
+                        "$cond": {
+                            "if": {"$gt": [{"$size": "$user_info"}, 0]},
+                            "then": {"$arrayElemAt": ["$user_info.username", 0]},
+                            "else": None
+                        }
+                    }
+                }
+            },
+            {
+                "$project": {
+                    "user_info": 0
+                }
+            }
+        ]
+        
+        cursor = db.sessions.aggregate(pipeline)
         docs = await cursor.to_list(length=None)
 
         sessions = []
@@ -439,13 +485,40 @@ async def get_escalated_sessions() -> List[Dict]:
             sessions.append({
                 "session_id": doc.get("session_id"),
                 "device_id": doc.get("device_id"),
-                "is_escalated": True,
+                "first_name": doc.get("first_name", "Unknown"),
+                "last_name": doc.get("last_name"),
+                "username": doc.get("username"),
+                "is_escalated": doc.get("is_escalated", False),
                 "escalated_at": doc.get("escalated_at"),
                 "created_at": doc.get("created_at"),
             })
 
-        logger.info(f"Found {len(sessions)} escalated sessions awaiting human response.")
+        logger.info(f"Fetched {len(sessions)} escalated sessions.")
         return sessions
     except Exception as e:
         logger.error(f"Failed to fetch escalated sessions: {e}")
+        return []
+
+
+async def get_expired_escalated_sessions(timeout_minutes: int) -> List[str]:
+    """
+    Finds escalated sessions that haven't been updated in `timeout_minutes` minutes.
+    Returns a list of `session_id`s.
+    """
+    db = get_database()
+    if db is None:
+        return []
+
+    from datetime import timedelta
+    expiration_time = datetime.now(timezone.utc) - timedelta(minutes=timeout_minutes)
+
+    try:
+        cursor = db.sessions.find({
+            "is_escalated": True,
+            "updated_at": {"$lte": expiration_time}
+        })
+        docs = await cursor.to_list(length=None)
+        return [doc["session_id"] for doc in docs]
+    except Exception as e:
+        logger.error(f"Failed to fetch expired escalated sessions: {e}")
         return []

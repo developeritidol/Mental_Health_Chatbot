@@ -226,6 +226,58 @@ async def _counselor_timeout_watchdog(session_id: str):
     logger.info(f"[TIMEOUT] Session '{session_id}' returned to AI mode after timeout.")
 
 
+# ── Global 35-Minute Inactivity Watchdog ──────────────────────────────────────
+
+async def inactivity_watchdog():
+    """
+    Runs globally in the background every 60 seconds.
+    Finds escalated sessions that haven't received a message in 35 minutes.
+    Closes the escalation, returns the user to AI, and forces the WebSocket tab to close.
+    """
+    from app.services.db_service import get_expired_escalated_sessions
+    logger.info("[WATCHDOG] Started 35-minute inactivity watchdog.")
+    
+    while True:
+        try:
+            # Check every 60 seconds
+            await asyncio.sleep(60)
+            
+            # Fetch sessions inactive for 35+ minutes
+            expired_sessions = await get_expired_escalated_sessions(timeout_minutes=35)
+            
+            for session_id in expired_sessions:
+                logger.warning(f"[WATCHDOG] Session '{session_id}' inactive for 35 mins. Closing.")
+                
+                # Close the escalation (sets is_escalated = False)
+                success = await close_escalation(session_id)
+                if not success:
+                    continue
+                
+                # Notify the user
+                timeout_msg = {
+                    "role": "system",
+                    "text": "This live session has been closed due to inactivity. You will now be returned to AI support.",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "is_human": False,
+                    "is_system": True,
+                    "type": "session_inactive"
+                }
+
+                # Save the system message in DB
+                await save_message({
+                    "session_id": session_id,
+                    "role": "system",
+                    "content": timeout_msg["text"],
+                    "device_id": "system",
+                })
+
+                # Broadcast over websocket to force UI close, then drop connections
+                await manager.send_to_all(session_id, timeout_msg)
+
+        except Exception as e:
+            logger.error(f"[WATCHDOG] Error in loop: {e}")
+
+
 # ── WebSocket Endpoint ────────────────────────────────────────────────────────
 
 @router.websocket("/human/{session_id}")

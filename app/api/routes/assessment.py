@@ -71,7 +71,7 @@ async def submit_assessment(req: AssessmentRequest):
     # 4. Generate opening message
     from app.services.db_service import build_personality_summary
     llm_profile = {
-        "name": profile_dict.get("name", "Friend"),
+        "name": f"{profile_dict.get('first_name', 'Friend')} {profile_dict.get('last_name', '')}".strip() or "Friend",
         "gender": profile_dict.get("gender", ""),
         "age": profile_dict.get("age"),
         "personality_summary": build_personality_summary(personality_dict),

@@ -31,6 +31,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Model warmup skipped: {e}")
         
+    # 3. Start Global 35-minute Inactivity Watchdog
+    try:
+        loop.create_task(human.inactivity_watchdog())
+    except Exception as e:
+        logger.error(f"Failed to start watchdog: {e}")
+
     logger.info("MindBridge ready.")
     yield
     logger.info("MindBridge shutting down.")

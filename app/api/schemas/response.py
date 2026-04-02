@@ -64,6 +64,9 @@ class SessionListResponse(BaseModel):
 class EscalatedSessionResponse(BaseModel):
     session_id: str
     device_id: str
+    first_name: str = "Unknown"
+    last_name: Optional[str] = None
+    username: Optional[str] = None
     is_escalated: bool
     escalated_at: Optional[datetime] = None
     created_at: Optional[datetime] = None

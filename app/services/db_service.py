@@ -176,6 +176,32 @@ async def get_user_profile(device_id: str) -> Optional[dict]:
 
 # ── Session ───────────────────────────────────────────────────────────────────
 
+async def get_existing_session(device_id: str) -> Optional[dict]:
+    """
+    Returns the existing session for a device_id, if one exists.
+    Enforces the one-device-one-session rule.
+    """
+    db = get_database()
+    if db is None:
+        return None
+    try:
+        doc = await db.sessions.find_one(
+            {"device_id": device_id},
+            sort=[("created_at", -1)],  # get the most recent one
+        )
+        if doc:
+            return {
+                "session_id": doc.get("session_id"),
+                "device_id": doc.get("device_id"),
+                "is_active": doc.get("is_active", True),
+                "is_escalated": doc.get("is_escalated", False),
+            }
+        return None
+    except Exception as e:
+        logger.error(f"Failed to lookup session for {device_id}: {e}")
+        return None
+
+
 async def create_session(session_data: dict) -> bool:
     """Creates a new session document."""
     db = get_database()

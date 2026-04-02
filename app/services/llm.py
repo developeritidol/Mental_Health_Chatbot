@@ -389,6 +389,33 @@ async def get_opening_message(profile: dict) -> str:
         )
 
 
+# ── History sanitizer ─────────────────────────────────────────────────────────
+
+_VALID_OPENAI_ROLES = {"system", "assistant", "user", "tool", "function", "developer"}
+
+def _sanitize_history(history: list[dict]) -> list[dict]:
+    """
+    Maps non-standard roles to OpenAI-compatible ones.
+    - 'human_counselor' → 'assistant' (counselor messages look like assistant)
+    - 'system' in chat history → 'assistant' (OpenAI only allows one system msg)
+    - anything else unknown → 'user'
+    """
+    sanitized = []
+    for msg in history:
+        role = msg.get("role", "user")
+        content = msg.get("content", "").strip()
+        if not content:
+            continue
+
+        if role == "human_counselor":
+            role = "assistant"
+        elif role not in _VALID_OPENAI_ROLES:
+            role = "user"
+
+        sanitized.append({"role": role, "content": content})
+    return sanitized
+
+
 # ── Main chat (non-streaming) ─────────────────────────────────────────────────
 
 async def chat(
@@ -402,7 +429,7 @@ async def chat(
         profile, history, user_message=user_message, consensus=consensus
     )
 
-    messages = history[-(settings.MAX_HISTORY_TURNS * 2):]
+    messages = _sanitize_history(history[-(settings.MAX_HISTORY_TURNS * 2):])
     messages = messages + [{"role": "user", "content": user_message}]
 
     try:
@@ -442,7 +469,7 @@ async def chat_stream(
         long_term_memory=long_term_memory,
     )
 
-    messages = history[-(settings.MAX_HISTORY_TURNS * 2):]
+    messages = _sanitize_history(history[-(settings.MAX_HISTORY_TURNS * 2):])
     messages = messages + [{"role": "user", "content": user_message}]
 
     try:

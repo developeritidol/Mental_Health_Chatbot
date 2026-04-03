@@ -28,7 +28,7 @@ class EmotionData(BaseModel):
 # ── Chat history API ─────────────────────────────────────────────────────────
 
 class ChatMessageResponse(BaseModel):
-    session_id: str
+    device_id: str
     role: str
     content: str
     timestamp: datetime
@@ -36,7 +36,7 @@ class ChatMessageResponse(BaseModel):
 
 class ChatHistoryResponse(BaseModel):
     status: str
-    session_id: str
+    device_id: str
     total_messages: int
     messages: list[ChatMessageResponse]
 

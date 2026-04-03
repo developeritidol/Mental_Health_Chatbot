@@ -251,6 +251,30 @@ async def escalate_session(session_id: str) -> bool:
         return False
 
 
+async def escalate_device(device_id: str) -> bool:
+    """
+    Marks all sessions for a device as escalated to a human operator.
+    Called immediately when safety.py detects is_crisis == True.
+    """
+    db = get_database()
+    if db is None:
+        return False
+    try:
+        await db.sessions.update_many(
+            {"device_id": device_id},
+            {"$set": {
+                "is_escalated": True,
+                "escalated_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }},
+        )
+        logger.warning(f"[ESCALATION] Device {device_id} handed off to human operator.")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to escalate device {device_id}: {e}")
+        return False
+
+
 async def close_escalation(session_id: str) -> bool:
     """
     Marks a session as no longer escalated.
@@ -276,6 +300,29 @@ async def close_escalation(session_id: str) -> bool:
         return False
 
 
+async def close_escalation_by_device(device_id: str) -> bool:
+    """
+    Marks all sessions for a device as no longer escalated.
+    """
+    db = get_database()
+    if db is None:
+        return False
+    try:
+        await db.sessions.update_many(
+            {"device_id": device_id, "is_escalated": True},
+            {"$set": {
+                "is_escalated": False,
+                "escalation_closed_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }},
+        )
+        logger.info(f"[ESCALATION CLOSED] All sessions for device {device_id} returned to AI mode.")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to close escalation for device {device_id}: {e}")
+        return False
+
+
 async def is_session_escalated(session_id: str) -> bool:
     """
     Checks whether a session is currently under human control.
@@ -291,6 +338,24 @@ async def is_session_escalated(session_id: str) -> bool:
         return False
     except Exception as e:
         logger.error(f"Failed to check escalation status for {session_id}: {e}")
+        return False
+
+
+async def is_device_escalated(device_id: str) -> bool:
+    """
+    Checks whether ANY session for this device is currently under human control.
+    Used by chat.py to block AI responses during active human intervention.
+    """
+    db = get_database()
+    if db is None:
+        return False
+    try:
+        doc = await db.sessions.find_one({"device_id": device_id, "is_escalated": True})
+        if doc:
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Failed to check escalation status for device {device_id}: {e}")
         return False
 
 
@@ -388,6 +453,37 @@ async def get_session_messages(session_id: str) -> List[Dict]:
         return formatted
     except Exception as e:
         logger.error(f"Failed to fetch messages for session {session_id}: {e}")
+        return []
+
+
+async def get_device_messages(device_id: str) -> List[Dict]:
+    """
+    Retrieves ALL messages for a given device_id.
+    Returns them sorted chronologically (oldest to newest) to rebuild the UI.
+    """
+    db = get_database()
+    if db is None:
+        logger.warning(f"DB not connected, returning empty history for device {device_id}")
+        return []
+
+    try:
+        cursor = db.messages.find({"device_id": device_id}).sort("timestamp", 1)
+        docs = await cursor.to_list(length=None)
+
+        formatted = []
+        for doc in docs:
+            if doc.get("content"):
+                formatted.append({
+                    "device_id": doc.get("device_id", "unknown"),
+                    "role": doc.get("role", "unknown"),
+                    "content": doc.get("content", ""),
+                    "timestamp": doc.get("timestamp"),
+                })
+
+        logger.info(f"Fetched {len(formatted)} messages for device {device_id}")
+        return formatted
+    except Exception as e:
+        logger.error(f"Failed to fetch messages for device {device_id}: {e}")
         return []
 
 

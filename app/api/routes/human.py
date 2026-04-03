@@ -1,7 +1,7 @@
 """
 Human Handoff — WebSocket Route + REST APIs
 ──────────────────────────────────────────────
-ws://host/ws/human/{session_id}
+ws://host/ws/human/{device_id}
 
 Two parties connect to the same session_id "room":
   1. The Android user  (role = "user")
@@ -13,8 +13,8 @@ Messages sent by either party are:
 
 REST APIs for Admin Dashboard:
   GET  /ws/escalated                           — list all escalated sessions
-  GET  /ws/escalated/{session_id}/messages     — read history before joining
-  POST /ws/escalated/{session_id}/close        — end the session, return to AI
+  GET  /ws/escalated/{device_id}/messages     — read history before joining
+  POST /ws/escalated/{device_id}/close        — end the session, return to AI
 """
 
 import json
@@ -25,8 +25,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
 from app.services.db_service import (
     save_message,
     get_escalated_sessions,
-    get_session_messages,
-    close_escalation,
+    get_device_messages,
+    close_escalation_by_device,
+    get_existing_session,
 )
 from app.api.schemas.response import (
     EscalatedSessionListResponse,
@@ -38,7 +39,7 @@ from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/ws", tags=["websocket"])
+router = APIRouter(prefix="/api/human", tags=["human"])
 
 # ── Fallback timeout (seconds) ────────────────────────────────────────────────
 # If no human counselor joins within this time, the system sends a fallback
@@ -63,38 +64,38 @@ async def list_escalated_sessions():
     )
 
 
-@router.get("/escalated/{session_id}/messages", response_model=ChatHistoryResponse)
-async def get_escalated_session_messages(session_id: str):
+@router.get("/escalated/{device_id}/messages", response_model=ChatHistoryResponse)
+async def get_escalated_session_messages(device_id: str):
     """
     Returns the full chat history for a specific escalated session.
     Allows the human counselor to read the conversation context
     before joining the WebSocket to start the live chat.
     """
-    if not session_id.strip():
-        raise HTTPException(status_code=400, detail="Session ID is required.")
+    if not device_id.strip():
+        raise HTTPException(status_code=400, detail="Device ID is required.")
 
-    messages = await get_session_messages(session_id)
+    messages = await get_device_messages(device_id)
     formatted = [ChatMessageResponse(**msg) for msg in messages]
 
     return ChatHistoryResponse(
         status="success",
-        session_id=session_id,
+        device_id=device_id,
         total_messages=len(formatted),
         messages=formatted,
     )
 
 
-@router.post("/escalated/{session_id}/close")
-async def close_escalated_session(session_id: str):
+@router.post("/escalated/{device_id}/close")
+async def close_escalated_session(device_id: str):
     """
     Called by the human counselor to end the intervention.
     Flips is_escalated = False so the user's next message 
     goes back to the AI automatically.
     """
-    if not session_id.strip():
-        raise HTTPException(status_code=400, detail="Session ID is required.")
+    if not device_id.strip():
+        raise HTTPException(status_code=400, detail="Device ID is required.")
 
-    success = await close_escalation(session_id)
+    success = await close_escalation_by_device(device_id)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to close escalation.")
 
@@ -107,7 +108,7 @@ async def close_escalated_session(session_id: str):
         "is_system": True,
         "type": "session_closed",
     }
-    for ws in manager.rooms.get(session_id, []):
+    for ws in manager.rooms.get(device_id, []):
         try:
             await ws.send_text(json.dumps(close_notice))
         except Exception:
@@ -115,46 +116,46 @@ async def close_escalated_session(session_id: str):
 
     return {
         "status": "success",
-        "session_id": session_id,
+        "device_id": device_id,
         "message": "Escalation closed. User will return to AI on next message.",
     }
 
 
 # ── Connection Manager ────────────────────────────────────────────────────────
-# Maps session_id → list of active WebSocket connections.
+# Maps device_id → list of active WebSocket connections.
 # Kept in-memory; perfectly fine for a single server instance.
 
 class ConnectionManager:
     def __init__(self):
-        # { session_id: [WebSocket, ...] }
+        # { device_id: [WebSocket, ...] }
         self.rooms: dict[str, list[WebSocket]] = {}
         # Track whether a human counselor has joined a room
         self.has_human: dict[str, bool] = {}
 
-    async def connect(self, session_id: str, ws: WebSocket):
+    async def connect(self, device_id: str, ws: WebSocket):
         await ws.accept()
-        self.rooms.setdefault(session_id, []).append(ws)
-        logger.info(f"[WS] New connection in room '{session_id}'. Total: {len(self.rooms[session_id])}")
+        self.rooms.setdefault(device_id, []).append(ws)
+        logger.info(f"[WS] New connection in room '{device_id}'. Total: {len(self.rooms[device_id])}")
 
-    def mark_human_joined(self, session_id: str):
-        self.has_human[session_id] = True
+    def mark_human_joined(self, device_id: str):
+        self.has_human[device_id] = True
 
-    def human_has_joined(self, session_id: str) -> bool:
-        return self.has_human.get(session_id, False)
+    def human_has_joined(self, device_id: str) -> bool:
+        return self.has_human.get(device_id, False)
 
-    def disconnect(self, session_id: str, ws: WebSocket):
-        if session_id in self.rooms:
-            self.rooms[session_id] = [c for c in self.rooms[session_id] if c is not ws]
-            if not self.rooms[session_id]:
-                del self.rooms[session_id]
-                self.has_human.pop(session_id, None)
-        logger.info(f"[WS] Connection closed from room '{session_id}'.")
+    def disconnect(self, device_id: str, ws: WebSocket):
+        if device_id in self.rooms:
+            self.rooms[device_id] = [c for c in self.rooms[device_id] if c is not ws]
+            if not self.rooms[device_id]:
+                del self.rooms[device_id]
+                self.has_human.pop(device_id, None)
+        logger.info(f"[WS] Connection closed from room '{device_id}'.")
 
-    async def broadcast(self, session_id: str, payload: dict, sender_ws: WebSocket):
+    async def broadcast(self, device_id: str, payload: dict, sender_ws: WebSocket):
         """Send JSON payload to ALL other parties in the room."""
         message = json.dumps(payload)
         dead = []
-        for ws in self.rooms.get(session_id, []):
+        for ws in self.rooms.get(device_id, []):
             if ws is sender_ws:
                 continue  # don't echo back to the sender
             try:
@@ -163,19 +164,18 @@ class ConnectionManager:
                 dead.append(ws)
         # clean up dead connections
         for ws in dead:
-            self.disconnect(session_id, ws)
+            self.disconnect(device_id, ws)
 
-    async def send_to_all(self, session_id: str, payload: dict):
-        """Send JSON payload to ALL parties in the room (including system messages)."""
+    async def send_to_all(self, device_id: str, payload: dict):
+        """Forcefully sends a JSON message to ALL parties in a room & drops them."""
         message = json.dumps(payload)
-        dead = []
-        for ws in self.rooms.get(session_id, []):
+        for ws in self.rooms.get(device_id, []):
             try:
                 await ws.send_text(message)
+                await ws.close()
             except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.disconnect(session_id, ws)
+                pass
+        self.disconnect(device_id, ws)
 
 
 manager = ConnectionManager()
@@ -183,7 +183,7 @@ manager = ConnectionManager()
 
 # ── 60-Second Fallback Timer ──────────────────────────────────────────────────
 
-async def _counselor_timeout_watchdog(session_id: str):
+async def _counselor_timeout_watchdog(device_id: str):
     """
     Runs as a background task after a user connects.
     If no human counselor joins within 60 seconds, sends a fallback 
@@ -192,10 +192,10 @@ async def _counselor_timeout_watchdog(session_id: str):
     await asyncio.sleep(COUNSELOR_TIMEOUT_SECONDS)
 
     # Check if a human counselor joined during the wait
-    if manager.human_has_joined(session_id):
+    if manager.human_has_joined(device_id):
         return  # counselor joined in time, nothing to do
 
-    logger.warning(f"[TIMEOUT] No counselor joined room '{session_id}' within {COUNSELOR_TIMEOUT_SECONDS}s. Sending fallback.")
+    logger.warning(f"[TIMEOUT] No counselor joined room '{device_id}' within {COUNSELOR_TIMEOUT_SECONDS}s. Sending fallback.")
 
     # Send fallback message to the user
     fallback = {
@@ -211,19 +211,23 @@ async def _counselor_timeout_watchdog(session_id: str):
         "is_system": True,
         "type": "counselor_unavailable",
     }
-    await manager.send_to_all(session_id, fallback)
+    await manager.send_to_all(device_id, fallback)
+
+    # Attempt to resolve the real session_id by looking up the device
+    session_info = await get_existing_session(device_id)
+    actual_session_id = session_info["session_id"] if session_info else device_id
 
     # Save the fallback message in DB so it's part of chat history
     await save_message({
-        "session_id": session_id,
+        "session_id": actual_session_id,
         "role": "system",
         "content": fallback["text"],
-        "device_id": "system",
+        "device_id": device_id,
     })
 
     # Re-enable AI on this session so the user isn't stuck
-    await close_escalation(session_id)
-    logger.info(f"[TIMEOUT] Session '{session_id}' returned to AI mode after timeout.")
+    await close_escalation_by_device(device_id)
+    logger.info(f"[TIMEOUT] Device '{device_id}' returned to AI mode after timeout.")
 
 
 # ── Global 35-Minute Inactivity Watchdog ──────────────────────────────────────
@@ -245,11 +249,11 @@ async def inactivity_watchdog():
             # Fetch sessions inactive for 35+ minutes
             expired_sessions = await get_expired_escalated_sessions(timeout_minutes=35)
             
-            for session_id in expired_sessions:
-                logger.warning(f"[WATCHDOG] Session '{session_id}' inactive for 35 mins. Closing.")
+            for device_id in expired_sessions:
+                logger.warning(f"[WATCHDOG] Device '{device_id}' inactive for 35 mins. Closing.")
                 
                 # Close the escalation (sets is_escalated = False)
-                success = await close_escalation(session_id)
+                success = await close_escalation_by_device(device_id)
                 if not success:
                     continue
                 
@@ -263,16 +267,20 @@ async def inactivity_watchdog():
                     "type": "session_inactive"
                 }
 
+                # Attempt to resolve the real session_id by looking up the device
+                session_info = await get_existing_session(device_id)
+                actual_session_id = session_info["session_id"] if session_info else device_id
+
                 # Save the system message in DB
                 await save_message({
-                    "session_id": session_id,
+                    "session_id": actual_session_id,
                     "role": "system",
                     "content": timeout_msg["text"],
                     "device_id": "system",
                 })
 
                 # Broadcast over websocket to force UI close, then drop connections
-                await manager.send_to_all(session_id, timeout_msg)
+                await manager.send_to_all(device_id, timeout_msg)
 
         except Exception as e:
             logger.error(f"[WATCHDOG] Error in loop: {e}")
@@ -280,8 +288,8 @@ async def inactivity_watchdog():
 
 # ── WebSocket Endpoint ────────────────────────────────────────────────────────
 
-@router.websocket("/human/{session_id}")
-async def human_chat_ws(websocket: WebSocket, session_id: str):
+@router.websocket("/chat/{device_id}")
+async def human_chat_ws(websocket: WebSocket, device_id: str):
     """
     Real-time human handoff endpoint.
 
@@ -293,17 +301,30 @@ async def human_chat_ws(websocket: WebSocket, session_id: str):
     role = websocket.query_params.get("role", "user")
     counselor_name = websocket.query_params.get("counselor_name", "Crisis Support Team")
 
-    await manager.connect(session_id, websocket)
-    logger.info(f"[WS] Role '{role}' joined room '{session_id}'")
+    # 1. Reject users if the device is not currently escalated
+    if role == "user":
+        from app.services.db_service import is_device_escalated
+        if not await is_device_escalated(device_id):
+            logger.warning(f"[WS REJECT] Unauthorized connection attempt from non-escalated device: {device_id}")
+            await websocket.accept() # Must accept before closing with custom code often
+            await websocket.send_json({
+                "type": "error",
+                "message": "This device is not authorized for human handoff."
+            })
+            await websocket.close(code=4003)
+            return
+
+    await manager.connect(device_id, websocket)
+    logger.info(f"[WS] Role '{role}' joined room '{device_id}'")
 
     # If the user connects, start the 60-second fallback timer
     if role == "user":
-        asyncio.create_task(_counselor_timeout_watchdog(session_id))
-        logger.info(f"[WS] Started {COUNSELOR_TIMEOUT_SECONDS}s counselor timeout for room '{session_id}'")
+        asyncio.create_task(_counselor_timeout_watchdog(device_id))
+        logger.info(f"[WS] Started {COUNSELOR_TIMEOUT_SECONDS}s counselor timeout for room '{device_id}'")
 
     # If a human counselor joins, mark it and broadcast a system message
     if role == "human_counselor":
-        manager.mark_human_joined(session_id)
+        manager.mark_human_joined(device_id)
         join_notice = {
             "role": "human_counselor",
             "counselor_name": counselor_name,
@@ -312,7 +333,7 @@ async def human_chat_ws(websocket: WebSocket, session_id: str):
             "is_human": True,
             "is_system": True,
         }
-        await manager.broadcast(session_id, join_notice, websocket)
+        await manager.broadcast(device_id, join_notice, websocket)
 
     try:
         while True:
@@ -342,24 +363,28 @@ async def human_chat_ws(websocket: WebSocket, session_id: str):
                 "is_human": is_human,
             }
 
+            # Attempt to resolve the real session_id by looking up the device
+            session_info = await get_existing_session(device_id)
+            actual_session_id = session_info["session_id"] if session_info else device_id
+
             # Persist message in MongoDB (same collection as AI chat)
             await save_message({
-                "session_id": session_id,
+                "session_id": actual_session_id,
                 "role": role,
                 "content": text,
-                "device_id": data.get("device_id", "unknown"),
+                "device_id": device_id,
                 "is_human_message": is_human,
             })
 
             # Broadcast to the other party in real-time
-            await manager.broadcast(session_id, payload, websocket)
+            await manager.broadcast(device_id, payload, websocket)
 
             # Echo confirmation back to sender
             ack = {**payload, "sent": True}
             await websocket.send_text(json.dumps(ack))
 
     except WebSocketDisconnect:
-        manager.disconnect(session_id, websocket)
+        manager.disconnect(device_id, websocket)
         # Notify the other party that this person left
         leave_notice = {
             "role": "system",
@@ -368,4 +393,4 @@ async def human_chat_ws(websocket: WebSocket, session_id: str):
             "is_human": False,
             "is_system": True,
         }
-        await manager.broadcast(session_id, leave_notice, websocket)
+        await manager.broadcast(device_id, leave_notice, websocket)

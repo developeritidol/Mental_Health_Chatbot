@@ -22,10 +22,11 @@ from app.services.db_service import (
     save_message,
     generate_embedding,
     retrieve_long_term_memory,
-    get_session_messages,
+    get_device_messages,
     get_all_sessions,
-    escalate_session,
-    is_session_escalated,
+    escalate_device,
+    is_device_escalated,
+    get_existing_session,
 )
 from app.core.logger import get_logger
 
@@ -82,13 +83,19 @@ async def stream_message(req: StreamChatRequest):
             detail="Profile not found. Complete assessment first.",
         )
 
+    # Resolve active session if needed for backwards compat
+    session_info = await get_existing_session(req.device_id)
+    actual_session_id = session_info["session_id"] if session_info else req.device_id
+
     # 1b. Guard: If this session is currently escalated to a human,
     #     block AI and redirect Android back to the WebSocket.
-    if await is_session_escalated(req.session_id):
+    if await is_device_escalated(req.device_id):
         from app.core.config import get_settings
         _settings = get_settings()
-        ws_url = f"ws://{_settings.SERVER_HOST}:{_settings.SERVER_PORT}/ws/human/{req.session_id}"
+        ws_url = f"ws://{_settings.SERVER_HOST}:{_settings.SERVER_PORT}/api/human/chat/{req.device_id}"
 
+        logger.info(f"[GUARD] Device {req.device_id} is escalated. Blocking AI and sending redirect.")
+        
         redirect_payload = {
             "done": True,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -107,12 +114,12 @@ async def stream_message(req: StreamChatRequest):
         )
 
     # 2. Load full conversation history from DB
-    history = await get_formatted_history(req.session_id, limit=100)
+    history = await get_formatted_history(actual_session_id, limit=100)
     turn_count = len(history) // 2
     recent_history_str = _build_recent_history_string(history, n_turns=4)
 
     logger.info("\n" + "═" * 70)
-    logger.info(f"[STREAM] Session: {req.session_id} | Turn: {turn_count}")
+    logger.info(f"[STREAM] Device: {req.device_id} | Session: {actual_session_id} | Turn: {turn_count}")
     logger.info(f"[USER]:  {req.message}")
     logger.info("═" * 70)
 
@@ -121,12 +128,12 @@ async def stream_message(req: StreamChatRequest):
     long_term_memory = await retrieve_long_term_memory(
         device_id=req.device_id,
         query_vector=query_vector,
-        exclude_session_id=req.session_id,
+        exclude_session_id=actual_session_id,
     )
 
     # 4. Save user message to DB (embedding is stored inside save_message automatically)
     await save_message({
-        "session_id": req.session_id,
+        "session_id": actual_session_id,
         "device_id": req.device_id,
         "turn_number": turn_count + 1,
         "role": "user",
@@ -167,35 +174,10 @@ async def stream_message(req: StreamChatRequest):
         logger.error(f"[STEP 2 ERROR] {e}")
         consensus = _safe_fallback_consensus()
 
-    # ── STEP 6: Crisis fork — stop AI, hand off to human ──────────────────────
+    # ── STEP 6: Crisis fork — escalate to human but stream normally ───────────
     if consensus.get("is_crisis") is True:
-        logger.warning(f"[ESCALATION] Crisis detected for session {req.session_id}. Blocking AI and routing to human.")
-        await escalate_session(req.session_id)
-
-        from app.core.config import get_settings
-        _settings = get_settings()
-        ws_url = f"ws://{_settings.SERVER_HOST}:{_settings.SERVER_PORT}/ws/human/{req.session_id}"
-
-        handoff_payload = {
-            "done": True,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "type": "escalation_required",
-            "handoff_message": (
-                "I can hear how much pain you're in right now. "
-                "I'm connecting you to a human crisis counselor immediately — "
-                "you don't have to face this alone."
-            ),
-            "websocket_url": ws_url,
-        }
-
-        async def _handoff_stream():
-            yield f"data: {json.dumps(handoff_payload)}\n\n"
-
-        return StreamingResponse(
-            _handoff_stream(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+        logger.warning(f"[ESCALATION] Crisis detected for device {req.device_id}. Escalating in background and streaming AI response consistently.")
+        await escalate_device(req.device_id)
 
     # ── STEP 7: Normal AI stream ───────────────────────────────────────────────
     async def generate():
@@ -223,6 +205,9 @@ async def stream_message(req: StreamChatRequest):
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "emotion": emotion_dict
             }
+            if consensus.get("is_crisis") is True:
+                done_payload["handoff_message"] = "A counselor is joining shortly... you're not alone."
+            
             yield f"data: {json.dumps(done_payload)}\n\n"
 
             # Save AI response to DB
@@ -237,7 +222,7 @@ async def stream_message(req: StreamChatRequest):
                 }
 
             await save_message({
-                "session_id": req.session_id,
+                "session_id": actual_session_id,
                 "device_id": req.device_id,
                 "turn_number": turn_count + 1,
                 "role": "assistant",
@@ -261,16 +246,16 @@ async def stream_message(req: StreamChatRequest):
 
 # ── Chat History API (by session_id) ──────────────────────────────────────────
 
-@router.get("/history/{session_id}", response_model=ChatHistoryResponse)
-async def get_chat_history(session_id: str):
+@router.get("/history/{device_id}", response_model=ChatHistoryResponse)
+async def get_chat_history(device_id: str):
     """
-    Returns ALL messages for a specific session_id, sorted chronologically.
+    Returns ALL messages for a specific device_id, sorted chronologically.
     Used by Android to load conversation history when opening a session.
     """
-    if not session_id.strip():
-        raise HTTPException(status_code=400, detail="Session ID is required.")
+    if not device_id.strip():
+        raise HTTPException(status_code=400, detail="Device ID is required.")
 
-    messages = await get_session_messages(session_id)
+    messages = await get_device_messages(device_id)
 
     formatted_messages = [
         ChatMessageResponse(**msg)
@@ -279,7 +264,7 @@ async def get_chat_history(session_id: str):
 
     return ChatHistoryResponse(
         status="success",
-        session_id=session_id,
+        device_id=device_id,
         total_messages=len(formatted_messages),
         messages=formatted_messages,
     )

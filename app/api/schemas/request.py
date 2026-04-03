@@ -36,6 +36,5 @@ class AssessmentRequest(BaseModel):
 
 class StreamChatRequest(BaseModel):
     """POST /api/chat/stream — every chat message from Android."""
-    session_id: str = Field(..., min_length=1)
     device_id: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1, max_length=2000)

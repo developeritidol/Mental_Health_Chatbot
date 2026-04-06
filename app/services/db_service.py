@@ -534,6 +534,14 @@ async def get_escalated_sessions() -> List[Dict]:
             {"$match": {"is_escalated": True}},
             {"$sort": {"escalated_at": -1}},
             {
+                "$group": {
+                    "_id": "$device_id",
+                    "doc": {"$first": "$$ROOT"}
+                }
+            },
+            {"$replaceRoot": {"newRoot": "$doc"}},
+            {"$sort": {"escalated_at": -1}},
+            {
                 "$lookup": {
                     "from": "users",
                     "localField": "device_id",

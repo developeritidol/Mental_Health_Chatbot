@@ -446,7 +446,7 @@ async def get_session_messages(session_id: str) -> List[Dict]:
                     "session_id": doc.get("session_id", "unknown"),
                     "role": doc.get("role", "unknown"),
                     "content": doc.get("content", ""),
-                    "timestamp": doc.get("timestamp"),
+                    "timestamp": doc.get("timestamp").replace(tzinfo=timezone.utc) if doc.get("timestamp") else None,
                 })
 
         logger.info(f"Fetched {len(formatted)} messages for session {session_id}")
@@ -477,7 +477,7 @@ async def get_device_messages(device_id: str) -> List[Dict]:
                     "device_id": doc.get("device_id", "unknown"),
                     "role": doc.get("role", "unknown"),
                     "content": doc.get("content", ""),
-                    "timestamp": doc.get("timestamp"),
+                    "timestamp": doc.get("timestamp").replace(tzinfo=timezone.utc) if doc.get("timestamp") else None,
                 })
 
         logger.info(f"Fetched {len(formatted)} messages for device {device_id}")
@@ -508,8 +508,8 @@ async def get_all_sessions(device_id: str) -> List[Dict]:
                 "device_id": doc.get("device_id"),
                 "is_active": doc.get("is_active", False),
                 "is_escalated": doc.get("is_escalated", False),
-                "created_at": doc.get("created_at"),
-                "updated_at": doc.get("updated_at"),
+                "created_at": doc.get("created_at").replace(tzinfo=timezone.utc) if doc.get("created_at") else None,
+                "updated_at": doc.get("updated_at").replace(tzinfo=timezone.utc) if doc.get("updated_at") else None,
             })
 
         logger.info(f"Fetched {len(sessions)} sessions for device {device_id}")
@@ -585,8 +585,8 @@ async def get_escalated_sessions() -> List[Dict]:
                 "last_name": doc.get("last_name"),
                 "username": doc.get("username"),
                 "is_escalated": doc.get("is_escalated", False),
-                "escalated_at": doc.get("escalated_at"),
-                "created_at": doc.get("created_at"),
+                "escalated_at": doc.get("escalated_at").replace(tzinfo=timezone.utc).isoformat() if doc.get("escalated_at") else None,
+                "created_at": doc.get("created_at").replace(tzinfo=timezone.utc).isoformat() if doc.get("created_at") else None,
             })
 
         logger.info(f"Fetched {len(sessions)} escalated sessions.")
@@ -596,10 +596,10 @@ async def get_escalated_sessions() -> List[Dict]:
         return []
 
 
-async def get_expired_escalated_sessions(timeout_minutes: int) -> List[str]:
+async def get_expired_escalated_sessions(timeout_minutes: int) -> List[Dict[str, str]]:
     """
     Finds escalated sessions that haven't been updated in `timeout_minutes` minutes.
-    Returns a list of `session_id`s.
+    Returns a list of dicts containing `session_id` and `device_id`.
     """
     db = get_database()
     if db is None:
@@ -614,7 +614,7 @@ async def get_expired_escalated_sessions(timeout_minutes: int) -> List[str]:
             "updated_at": {"$lte": expiration_time}
         })
         docs = await cursor.to_list(length=None)
-        return [doc["session_id"] for doc in docs]
+        return [{"session_id": doc["session_id"], "device_id": doc.get("device_id", doc["session_id"])} for doc in docs]
     except Exception as e:
         logger.error(f"Failed to fetch expired escalated sessions: {e}")
         return []

@@ -24,7 +24,7 @@ from app.services.db_service import (
     retrieve_long_term_memory,
     get_device_messages,
     get_all_sessions,
-    escalate_device,
+    escalate_session,
     is_device_escalated,
     get_existing_session,
 )
@@ -177,7 +177,15 @@ async def stream_message(req: StreamChatRequest):
     # ── STEP 6: Crisis fork — escalate to human but stream normally ───────────
     if consensus.get("is_crisis") is True:
         logger.warning(f"[ESCALATION] Crisis detected for device {req.device_id}. Escalating in background and streaming AI response consistently.")
-        await escalate_device(req.device_id)
+        await escalate_session(actual_session_id)
+        
+        from app.api.routes.human import manager
+        await manager.broadcast_to_dashboard({
+            "type": "new_escalation",
+            "session_id": actual_session_id,
+            "device_id": req.device_id,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
 
     # ── STEP 7: Normal AI stream ───────────────────────────────────────────────
     async def generate():

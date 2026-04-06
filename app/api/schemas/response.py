@@ -68,8 +68,8 @@ class EscalatedSessionResponse(BaseModel):
     last_name: Optional[str] = None
     username: Optional[str] = None
     is_escalated: bool
-    escalated_at: Optional[datetime] = None
-    created_at: Optional[datetime] = None
+    escalated_at: Optional[str] = None
+    created_at: Optional[str] = None
 
 
 class EscalatedSessionListResponse(BaseModel):

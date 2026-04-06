@@ -26,6 +26,7 @@ from app.services.db_service import (
     save_message,
     get_escalated_sessions,
     get_device_messages,
+    close_escalation,
     close_escalation_by_device,
     get_existing_session,
 )
@@ -131,6 +132,8 @@ class ConnectionManager:
         self.rooms: dict[str, list[WebSocket]] = {}
         # Track whether a human counselor has joined a room
         self.has_human: dict[str, bool] = {}
+        # Admin dashboard connections listening for new escalations
+        self.dashboard_clients: set[WebSocket] = set()
 
     async def connect(self, device_id: str, ws: WebSocket):
         await ws.accept()
@@ -169,13 +172,37 @@ class ConnectionManager:
     async def send_to_all(self, device_id: str, payload: dict):
         """Forcefully sends a JSON message to ALL parties in a room & drops them."""
         message = json.dumps(payload)
-        for ws in self.rooms.get(device_id, []):
+        ws_list = self.rooms.get(device_id, []).copy()
+        for ws in ws_list:
             try:
                 await ws.send_text(message)
                 await ws.close()
             except Exception:
                 pass
-        self.disconnect(device_id, ws)
+            self.disconnect(device_id, ws)
+
+    async def connect_dashboard(self, ws: WebSocket):
+        await ws.accept()
+        self.dashboard_clients.add(ws)
+        logger.info(f"[WS] Admin dashboard connected. Total: {len(self.dashboard_clients)}")
+
+    def disconnect_dashboard(self, ws: WebSocket):
+        self.dashboard_clients.discard(ws)
+        logger.info(f"[WS] Admin dashboard disconnected. Total: {len(self.dashboard_clients)}")
+
+    async def broadcast_to_dashboard(self, payload: dict):
+        """Broadcast an event to all connected human admin dashboards."""
+        if not self.dashboard_clients:
+            return
+        message = json.dumps(payload)
+        dead = set()
+        for ws in self.dashboard_clients:
+            try:
+                await ws.send_text(message)
+            except Exception:
+                dead.add(ws)
+        for ws in dead:
+            self.disconnect_dashboard(ws)
 
 
 manager = ConnectionManager()
@@ -249,11 +276,14 @@ async def inactivity_watchdog():
             # Fetch sessions inactive for 35+ minutes
             expired_sessions = await get_expired_escalated_sessions(timeout_minutes=35)
             
-            for device_id in expired_sessions:
-                logger.warning(f"[WATCHDOG] Device '{device_id}' inactive for 35 mins. Closing.")
+            for expired_info in expired_sessions:
+                session_id = expired_info["session_id"]
+                device_id = expired_info["device_id"]
+                
+                logger.warning(f"[WATCHDOG] Session '{session_id}' (Device '{device_id}') inactive for 35 mins. Closing.")
                 
                 # Close the escalation (sets is_escalated = False)
-                success = await close_escalation_by_device(device_id)
+                success = await close_escalation(session_id)
                 if not success:
                     continue
                 
@@ -267,13 +297,9 @@ async def inactivity_watchdog():
                     "type": "session_inactive"
                 }
 
-                # Attempt to resolve the real session_id by looking up the device
-                session_info = await get_existing_session(device_id)
-                actual_session_id = session_info["session_id"] if session_info else device_id
-
                 # Save the system message in DB
                 await save_message({
-                    "session_id": actual_session_id,
+                    "session_id": session_id,
                     "role": "system",
                     "content": timeout_msg["text"],
                     "device_id": "system",
@@ -287,6 +313,27 @@ async def inactivity_watchdog():
 
 
 # ── WebSocket Endpoint ────────────────────────────────────────────────────────
+
+@router.websocket("/escalated/ws")
+async def dashboard_notifications_ws(websocket: WebSocket):
+    """
+    Global WebSocket for the Admin Dashboard.
+    Listens for real-time events like 'new_escalation' so the frontend
+    can dynamically update without a full page reload.
+    """
+    await manager.connect_dashboard(websocket)
+    try:
+        while True:
+            # Keep connection alive; clients mostly just listen
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        manager.disconnect_dashboard(websocket)
+    except Exception as e:
+        logger.error(f"[WS DASHBOARD] Error: {e}")
+        manager.disconnect_dashboard(websocket)
+
 
 @router.websocket("/chat/{device_id}")
 async def human_chat_ws(websocket: WebSocket, device_id: str):

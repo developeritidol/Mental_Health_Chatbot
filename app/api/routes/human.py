@@ -45,7 +45,7 @@ router = APIRouter(prefix="/api/human", tags=["human"])
 # ── Fallback timeout (seconds) ────────────────────────────────────────────────
 # If no human counselor joins within this time, the system sends a fallback
 # message with crisis helpline info and re-enables AI on the session.
-COUNSELOR_TIMEOUT_SECONDS = 180  # 3 minutes
+COUNSELOR_TIMEOUT_SECONDS = 1200  # 20 minutes
 
 
 # ── REST APIs for Human Admin Dashboard ───────────────────────────────────────
@@ -208,12 +208,12 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-# ── 60-Second Fallback Timer ──────────────────────────────────────────────────
+# ── Counselor Fallback Timer ──────────────────────────────────────────────────
 
 async def _counselor_timeout_watchdog(device_id: str):
     """
     Runs as a background task after a user connects.
-    If no human counselor joins within 60 seconds, sends a fallback 
+    If no human counselor joins within the timeout period, sends a fallback 
     message with crisis helpline info and re-enables AI on the session.
     """
     await asyncio.sleep(COUNSELOR_TIMEOUT_SECONDS)

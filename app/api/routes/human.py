@@ -81,6 +81,8 @@ async def get_escalated_session_messages(device_id: str):
     else:
         from app.services.db_service import get_session_messages
         messages = await get_session_messages(session_info["session_id"])
+        for msg in messages:
+            msg["device_id"] = device_id
 
     formatted = [ChatMessageResponse(**msg) for msg in messages]
 

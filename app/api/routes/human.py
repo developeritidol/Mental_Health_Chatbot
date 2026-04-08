@@ -52,7 +52,7 @@ COUNSELOR_TIMEOUT_SECONDS = 1200  # 20 minutes
 
 @router.get("/escalated", response_model=EscalatedSessionListResponse)
 async def list_escalated_sessions():
-    """
+    """ 
     Returns all sessions that have been flagged for human intervention.
     Used by the Admin Dashboard to show the queue of users needing help.
     """
@@ -75,7 +75,13 @@ async def get_escalated_session_messages(device_id: str):
     if not device_id.strip():
         raise HTTPException(status_code=400, detail="Device ID is required.")
 
-    messages = await get_device_messages(device_id)
+    session_info = await get_existing_session(device_id)
+    if not session_info:
+        messages = []
+    else:
+        from app.services.db_service import get_session_messages
+        messages = await get_session_messages(session_info["session_id"])
+
     formatted = [ChatMessageResponse(**msg) for msg in messages]
 
     return ChatHistoryResponse(
@@ -99,6 +105,9 @@ async def close_escalated_session(device_id: str):
     success = await close_escalation_by_device(device_id)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to close escalation.")
+
+    # Cancel any pending counselor fallback timeouts since the session is closed
+    manager.cancel_timeout_task(device_id)
 
     # Notify everyone in the WebSocket room that the session is ending
     close_notice = {
@@ -134,6 +143,21 @@ class ConnectionManager:
         self.has_human: dict[str, bool] = {}
         # Admin dashboard connections listening for new escalations
         self.dashboard_clients: set[WebSocket] = set()
+        # Track counselor fallback timeout tasks
+        self.timeout_tasks: dict[str, asyncio.Task] = {}
+
+    def start_timeout_task(self, device_id: str, task: asyncio.Task):
+        self.timeout_tasks[device_id] = task
+
+    def cancel_timeout_task(self, device_id: str):
+        task = self.timeout_tasks.pop(device_id, None)
+        if task:
+            task.cancel()
+
+    def remove_timeout_task(self, device_id: str):
+        # only remove if it hasn't been replaced
+        if device_id in self.timeout_tasks:
+            del self.timeout_tasks[device_id]
 
     async def connect(self, device_id: str, ws: WebSocket):
         await ws.accept()
@@ -216,7 +240,12 @@ async def _counselor_timeout_watchdog(device_id: str):
     If no human counselor joins within the timeout period, sends a fallback 
     message with crisis helpline info and re-enables AI on the session.
     """
-    await asyncio.sleep(COUNSELOR_TIMEOUT_SECONDS)
+    try:
+        await asyncio.sleep(COUNSELOR_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        return  # Cancelled because counselor joined or session was closed
+    finally:
+        manager.remove_timeout_task(device_id)
 
     # Check if a human counselor joined during the wait
     if manager.human_has_joined(device_id):
@@ -364,14 +393,17 @@ async def human_chat_ws(websocket: WebSocket, device_id: str):
     await manager.connect(device_id, websocket)
     logger.info(f"[WS] Role '{role}' joined room '{device_id}'")
 
-    # If the user connects, start the 60-second fallback timer
+    # If the user connects, start the fallback timer if it hasn't been started yet
     if role == "user":
-        asyncio.create_task(_counselor_timeout_watchdog(device_id))
-        logger.info(f"[WS] Started {COUNSELOR_TIMEOUT_SECONDS}s counselor timeout for room '{device_id}'")
+        if device_id not in manager.timeout_tasks:
+            task = asyncio.create_task(_counselor_timeout_watchdog(device_id))
+            manager.start_timeout_task(device_id, task)
+            logger.info(f"[WS] Started {COUNSELOR_TIMEOUT_SECONDS}s counselor timeout for room '{device_id}'")
 
     # If a human counselor joins, mark it and broadcast a system message
     if role == "human_counselor":
         manager.mark_human_joined(device_id)
+        manager.cancel_timeout_task(device_id)
         join_notice = {
             "role": "human_counselor",
             "counselor_name": counselor_name,
@@ -390,9 +422,14 @@ async def human_chat_ws(websocket: WebSocket, device_id: str):
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
-                await websocket.send_text(
-                    json.dumps({"error": "Invalid JSON"})
-                )
+                if raw.strip().lower() == "ping":
+                    await websocket.send_text("pong")
+                    continue
+                await websocket.send_text(json.dumps({"error": "Invalid JSON"}))
+                continue
+
+            if data.get("type") == "ping":
+                await websocket.send_text(json.dumps({"type": "pong"}))
                 continue
 
             text = data.get("text", "").strip()
@@ -403,11 +440,13 @@ async def human_chat_ws(websocket: WebSocket, device_id: str):
 
             # Build the broadcast payload
             payload = {
+                "type": "message",
                 "role": role,
                 "counselor_name": counselor_name if is_human else None,
                 "text": text,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "is_human": is_human,
+                "done": True,  # Help trigger TTS on Android client
             }
 
             # Attempt to resolve the real session_id by looking up the device

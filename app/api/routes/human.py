@@ -21,7 +21,7 @@ import json
 import asyncio
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from app.services.db_service import (
     save_message,
     get_escalated_sessions,
@@ -37,6 +37,7 @@ from app.api.schemas.response import (
     ChatMessageResponse,
 )
 from app.core.logger import get_logger
+from app.core.auth.oauth2 import get_current_user
 
 logger = get_logger(__name__)
 
@@ -51,7 +52,7 @@ COUNSELOR_TIMEOUT_SECONDS = 1200  # 20 minutes
 # ── REST APIs for Human Admin Dashboard ───────────────────────────────────────
 
 @router.get("/escalated", response_model=EscalatedSessionListResponse)
-async def list_escalated_sessions():
+async def list_escalated_sessions(user = Depends(get_current_user)):
     """ 
     Returns all sessions that have been flagged for human intervention.
     Used by the Admin Dashboard to show the queue of users needing help.
@@ -66,7 +67,7 @@ async def list_escalated_sessions():
 
 
 @router.get("/escalated/{device_id}/messages", response_model=ChatHistoryResponse)
-async def get_escalated_session_messages(device_id: str):
+async def get_escalated_session_messages(device_id: str, user = Depends(get_current_user)):
     """
     Returns the full chat history for a specific escalated session.
     Allows the human counselor to read the conversation context
@@ -95,7 +96,7 @@ async def get_escalated_session_messages(device_id: str):
 
 
 @router.post("/escalated/{device_id}/close")
-async def close_escalated_session(device_id: str):
+async def close_escalated_session(device_id: str, user = Depends(get_current_user)):
     """
     Called by the human counselor to end the intervention.
     Flips is_escalated = False so the user's next message 

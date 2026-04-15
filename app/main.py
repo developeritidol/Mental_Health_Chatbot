@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.logger import get_logger
-from app.api.routes import chat, audio, assessment, human
+from app.api.routes import chat, audio, assessment, human, user
 
 logger = get_logger("main")
 settings = get_settings()
@@ -63,6 +63,7 @@ app.include_router(chat.router)
 app.include_router(audio.router)
 app.include_router(assessment.router)
 app.include_router(human.router)
+app.include_router(user.router)
 
 # ── Static files (UI) ─────────────────────────────────────────────────────────
 app.mount("/static", StaticFiles(directory="app/static"), name="static")

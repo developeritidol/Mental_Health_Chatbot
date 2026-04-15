@@ -84,3 +84,39 @@ class TranscriptionResponse(BaseModel):
     text: str
     language: Optional[str] = None
     duration: Optional[float] = None
+
+
+# ── Admin / User API responses ─────────────────────────────────────────────────
+
+class TokenData(BaseModel):
+    useremail: str
+
+
+class UserSignupResponse(BaseModel):
+    status: str
+    message: str
+    user_id: str
+
+
+class UserLoginResponse(BaseModel):
+    status: str
+    message: str
+    user: dict  # simplified user data without password
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+
+class ForgotPasswordResponse(BaseModel):
+    status: str
+    message: str
+
+
+class VerifyOtpResponse(BaseModel):
+    status: str
+    message: str
+
+
+class ResetPasswordResponse(BaseModel):
+    status: str
+    message: str

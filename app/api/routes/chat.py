@@ -8,11 +8,12 @@ Server loads profile and full history from MongoDB.
 
 import json
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.api.schemas.request import StreamChatRequest
 from app.api.schemas.response import ChatHistoryResponse, ChatMessageResponse, SessionListResponse, SessionResponse
+from app.core.auth.oauth2 import get_current_user
 from app.services import emotion as emotion_svc
 from app.services import llm as llm_svc
 from app.services.safety import synthesize_consensus
@@ -66,7 +67,7 @@ def _safe_fallback_consensus() -> dict:
 # ── SSE Stream ─────────────────────────────────────────────────────────────────
 
 @router.post("/stream")
-async def stream_message(req: StreamChatRequest):
+async def stream_message(req: StreamChatRequest, user = Depends(get_current_user)):
     """
     Main chat endpoint for Android.
     Android sends: session_id + device_id + message.
@@ -255,7 +256,7 @@ async def stream_message(req: StreamChatRequest):
 # ── Chat History API (by session_id) ──────────────────────────────────────────
 
 @router.get("/history/{device_id}", response_model=ChatHistoryResponse)
-async def get_chat_history(device_id: str):
+async def get_chat_history(device_id: str, user = Depends(get_current_user)):
     """
     Returns ALL messages for a specific device_id, sorted chronologically.
     Used by Android to load conversation history when opening a session.
@@ -281,7 +282,7 @@ async def get_chat_history(device_id: str):
 # ── Sessions List API (by device_id) ─────────────────────────────────────────
 
 @router.get("/sessions/{device_id}", response_model=SessionListResponse)
-async def get_device_sessions(device_id: str):
+async def get_device_sessions(device_id: str, user = Depends(get_current_user)):
     """
     Returns ALL sessions for a specific device_id, sorted newest first.
     Used by Android to list all past conversations when the app is reopened.
@@ -301,4 +302,4 @@ async def get_device_sessions(device_id: str):
         device_id=device_id,
         total_sessions=len(formatted_sessions),
         sessions=formatted_sessions,
-    )
+    )

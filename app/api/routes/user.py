@@ -5,10 +5,11 @@ POST /api/users/register
 POST /api/users/login
 """
 
-from typing import Optional
+import re
+from typing import Optional, Literal
 from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.security import OAuth2PasswordRequestForm
-from datetime import datetime,timedelta
+from datetime import datetime, timedelta
 from app.core.auth.oauth2 import get_current_user
 
 from app.api.schemas.request import (
@@ -28,9 +29,117 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/users", tags=["users"])
 
 
+# ── Helper Functions ───────────────────────────────────────────────────────
+
+ALLOWED_ROLES = {"user", "admin"}
+
+def detect_identifier_type(identifier: str) -> Literal["email", "phone", "username"]:
+    """
+    Detect the type of identifier provided (email, phone, or username).
+    
+    Args:
+        identifier: The user-provided identifier string
+        
+    Returns:
+        One of: "email", "phone", "username"
+        
+    Raises:
+        ValueError: If identifier format is invalid
+    """
+    # Email pattern: contains @ and domain
+    email_pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+    if re.match(email_pattern, identifier):
+        return "email"
+    
+    # Phone pattern: starts with + followed by digits, or just digits
+    phone_pattern = r"^\+?[1-9]\d{1,14}$"
+    if re.match(phone_pattern, identifier):
+        return "phone"
+    
+    # Username pattern: alphanumeric with underscores, 3-30 chars
+    username_pattern = r"^[a-zA-Z0-9_]{3,30}$"
+    if re.match(username_pattern, identifier):
+        return "username"
+    
+    raise ValueError(f"Invalid identifier format: {identifier}")
+
+
+async def find_user_by_identifier(db, identifier: str):
+    """
+    Find a user in the database by email, phone number, or username.
+    
+    Args:
+        db: Database connection
+        identifier: User-provided identifier (email, phone, or username)
+        
+    Returns:
+        User document or None if not found
+    """
+    try:
+        identifier_type = detect_identifier_type(identifier)
+    except ValueError:
+        return None
+    
+    query_map = {
+        "email": {"email": identifier},
+        "phone": {"phone_number": identifier},
+        "username": {"username": identifier}
+    }
+    
+    query = query_map[identifier_type]
+    return await db.users.find_one(query)
+
+
+def validate_user_role(role: str) -> None:
+    """
+    Validate that the user role is allowed.
+    
+    Args:
+        role: The user's role
+        
+    Raises:
+        HTTPException: If role is invalid
+    """
+    if not role:
+        raise HTTPException(
+            status_code=400,
+            detail="Role is required"
+        )
+    
+    normalized_role = role.strip().lower()
+    
+    if normalized_role not in ALLOWED_ROLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid role '{role}'. Allowed roles: {', '.join(sorted(ALLOWED_ROLES))}"
+        )
+    
+    return normalized_role
+
+
+def validate_account_status(user_doc: dict) -> None:
+    """
+    Validate that the user account is active and can log in.
+    
+    Args:
+        user_doc: User document from database
+        
+    Raises:
+        HTTPException: If account is inactive or disabled
+    """
+    is_active = user_doc.get("is_active", True)
+    
+    if not is_active:
+        raise HTTPException(
+            status_code=403,
+            detail="Account is disabled. Please contact support for assistance."
+        )
+
+
 @router.post("/register", response_model=UserSignupResponse)
 async def user_register(
     full_name: str = Query(..., min_length=1, max_length=100),
+    username: str = Query(..., min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_]+$"),
     email: str = Query(..., pattern=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"),
     password: str = Query(..., min_length=8, max_length=128),
     phone_number: str = Query(..., pattern=r"^\+?[1-9]\d{1,14}$"),
@@ -50,9 +159,14 @@ async def user_register(
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed. Please check MongoDB connection.")
 
-        existing = await db.users.find_one({"$or": [{"email": email}, {"phone_number": phone_number}]})
+        existing = await db.users.find_one({"$or": [{"email": email}, {"phone_number": phone_number}, {"username": username}]})
         if existing:
-            raise HTTPException(status_code=400, detail="Email or phone number already registered")
+            if existing.get("email") == email:
+                raise HTTPException(status_code=400, detail="Email already registered")
+            elif existing.get("phone_number") == phone_number:
+                raise HTTPException(status_code=400, detail="Phone number already registered")
+            elif existing.get("username") == username:
+                raise HTTPException(status_code=400, detail="Username already taken")
 
         password_hash = Hash.bcrypt(password)
         role_value = role.strip().lower()
@@ -97,6 +211,7 @@ async def user_register(
 
         user = UserModelDB(
             full_name=full_name,
+            username=username,
             email=email,
             password_hash=password_hash,
             phone_number=phone_number,
@@ -136,31 +251,107 @@ async def user_register(
 async def user_login(
     form_data: OAuth2PasswordRequestForm = Depends(),
 ):
-    """Login for admin or normal user."""
+    """
+    Login using username, email, or phone number.
+    
+    Supports three identifier types:
+    - Username: alphanumeric with underscores (3-30 characters)
+    - Email: standard email format
+    - Phone: international format with optional + prefix
+    
+    Validates:
+    - User exists with provided identifier
+    - Password is correct
+    - Role is valid (user or admin)
+    - Account is active (not disabled)
+    """
     try:
+        # Database connection check
         db = get_database()
         if db is None:
-            raise HTTPException(status_code=503, detail="Database connection failed.")
+            raise HTTPException(
+                status_code=503,
+                detail="Database connection failed. Please try again later."
+            )
 
-        identifier = form_data.username
+        # Extract credentials from OAuth2 form
+        login_identifier = form_data.username  # Can be username, email, or phone
         password = form_data.password
 
-        user_doc = await db.users.find_one({"$or": [{"email": identifier}, {"phone_number": identifier}]})
-        if not user_doc or not user_doc.get("password_hash"):
-            raise HTTPException(status_code=401, detail="Invalid credentials")
+        # Validate password is provided
+        if not password or len(password) < 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Password is required"
+            )
 
+        # Find user by identifier (username, email, or phone)
+        user_doc = await find_user_by_identifier(db, login_identifier)
+        
+        # User not found - return generic error for security
+        if not user_doc:
+            logger.warning(f"Login attempt with non-existent identifier: {login_identifier}")
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid credentials"
+            )
+
+        # Check if user has password hash
+        if not user_doc.get("password_hash"):
+            logger.error(f"User {login_identifier} has no password hash")
+            raise HTTPException(
+                status_code=500,
+                detail="Account configuration error. Please contact support."
+            )
+
+        # Verify password
         if not Hash.verify(user_doc['password_hash'], password):
-            raise HTTPException(status_code=401, detail="Invalid credentials")
+            logger.warning(f"Invalid password attempt for identifier: {login_identifier}")
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid credentials"
+            )
 
-        await db.users.update_one({"_id": user_doc["_id"]}, {"$set": {"last_login": datetime.utcnow()}})
+        # Validate user role
+        user_role = user_doc.get("role", "user")
+        try:
+            validate_user_role(user_role)
+        except HTTPException:
+            logger.error(f"User {login_identifier} has invalid role: {user_role}")
+            raise HTTPException(
+                status_code=403,
+                detail="Account configuration error. Please contact support."
+            )
 
+        # Validate account status (active/disabled)
+        try:
+            validate_account_status(user_doc)
+        except HTTPException as e:
+            logger.warning(f"Login attempt for disabled account: {login_identifier}")
+            raise e
+
+        # Update last login timestamp
+        await db.users.update_one(
+            {"_id": user_doc["_id"]},
+            {"$set": {"last_login": datetime.utcnow()}}
+        )
+
+        # Prepare user data for response (exclude sensitive fields)
         user_data = {k: v for k, v in user_doc.items() if k not in ['password_hash', '_id']}
         user_data['user_id'] = str(user_doc['_id'])
 
-        access_token = create_access_token(data={"sub": user_doc["email"]})
-        refresh_token = create_refresh_token(data={"sub": user_doc["email"]})
+        # Generate JWT tokens
+        token_subject = user_doc.get("email") or user_doc.get("username") or str(user_doc["_id"])
+        access_token = create_access_token(data={"sub": token_subject, "role": user_role})
+        refresh_token = create_refresh_token(data={"sub": token_subject})
 
-        logger.info(f"User logged in: {identifier}")
+        # Log successful login
+        identifier_type = detect_identifier_type(login_identifier)
+        logger.info(
+            f"✅ Successful login | Type: {identifier_type} | ID: {login_identifier} | "
+            f"Role: {user_role} | User ID: {user_data['user_id']}"
+        )
+
         return UserLoginResponse(
             status="success",
             message="Login successful",
@@ -169,17 +360,22 @@ async def user_login(
             refresh_token=refresh_token,
         )
 
-    except HTTPException as e:
-        raise e
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
-        logger.error(f"Login Error: {e}")
-        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
+        # Log unexpected errors
+        logger.error(f"❌ Login Error: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred during login. Please try again later."
+        )
 
 
 @router.post("/forgot-password", response_model=ForgotPasswordResponse)
 async def forgot_password(
     email: str = Query(..., description="User email address"),
-    user = Depends(get_current_user)
+    # user = Depends(get_current_user)
 ):
     """Initiate password reset by sending OTP to email."""
     try:

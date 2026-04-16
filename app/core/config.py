@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     SYNTHESIZER_MODEL: str = "gpt-4o-mini"
 
     # ── Groq Whisper (STT) ───────────────────────────────────────────────────
+    GROQ_API_KEY: str = ""
     GROQ_WHISPER_MODEL: str = "whisper-large-v3"
 
     # ── HuggingFace Emotion Model ─────────────────────────────────────────────
@@ -53,6 +54,16 @@ class Settings(BaseSettings):
     # llm.py overrides this dynamically per message class.
     # This value is a safety fallback ONLY — never used for normal chat flow.
     MAX_TOKENS: int = 300
+
+    # ── Server address (used to build WebSocket URLs) ─────────────────────────
+    SERVER_HOST: str = "localhost"
+    SERVER_PORT: int = 8000
+
+    # ── JWT Authentication ────────────────────────────────────────────────────
+    SECRET_KEY: str = "RstMdMMoEvxlHLMPeCjCTDKChP_ikTuraTEaLgkiCUI"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     class Config:
         env_file          = ".env"

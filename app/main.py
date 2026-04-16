@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.logger import get_logger
-from app.api.routes import chat, audio, assessment
+from app.api.routes import chat, audio, assessment, human, user
 
 logger = get_logger("main")
 settings = get_settings()
@@ -31,6 +31,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Model warmup skipped: {e}")
         
+    # 3. Start Global 35-minute Inactivity Watchdog
+    try:
+        loop.create_task(human.inactivity_watchdog())
+    except Exception as e:
+        logger.error(f"Failed to start watchdog: {e}")
+
     logger.info("MindBridge ready.")
     yield
     logger.info("MindBridge shutting down.")
@@ -56,6 +62,8 @@ app.add_middleware(
 app.include_router(chat.router)
 app.include_router(audio.router)
 app.include_router(assessment.router)
+app.include_router(human.router)
+app.include_router(user.router)
 
 # ── Static files (UI) ─────────────────────────────────────────────────────────
 app.mount("/static", StaticFiles(directory="app/static"), name="static")

@@ -6,12 +6,12 @@ services:
     container_name: mindbridge-api
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
-      # Connects directly to your MongoDB Atlas cluster
+      # Connects directly to your MongoDB Atlas cluster if it wasn't specified in .env
       - MONGODB_URL=${MONGODB_URL:-mongodb+srv://tejashitidoltechnologies_db_user:somLsHQbY2RxXNGJ@cluster0.bdj4ff0.mongodb.net/?appName=Cluster0}
       - DATABASE_NAME=mindbridge_db
-      # Make sure you provide your OpenAI API key here or in an .env file
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
       # Persists logs to the server
       - ./logs:/app/logs

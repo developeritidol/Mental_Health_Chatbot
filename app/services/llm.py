@@ -127,6 +127,7 @@ def build_system_prompt(
     conversation_so_far: Optional[list] = None,
     user_message: str = "",
     consensus: Optional[dict] = None,
+    long_term_memory: Optional[list] = None,
 ) -> tuple[str, int]:
     """
     Returns (system_prompt: str, token_budget: int).
@@ -273,6 +274,15 @@ def build_system_prompt(
     # ── Anti-repetition (reduced to last 1 only) ─────────────────────────────
     anti_rep = _extract_bot_last_opening(conversation_so_far)
 
+    # ── Long-term memory (RAG) ────────────────────────────────────────────────
+    memory_section = ""
+    if long_term_memory:
+        formatted = "\n".join(f"  - {m}" for m in long_term_memory)
+        memory_section = (
+            f"\nRelevant moments from past conversations with {name}:\n{formatted}\n"
+            f"Use this only if it naturally connects to what they're saying now. Don't force it.\n"
+        )
+
     # ─────────────────────────────────────────────────────────────────────────
     # FULL PROMPT — v5: Identity-first, lean, trusts GPT-4o
     # ─────────────────────────────────────────────────────────────────────────
@@ -288,7 +298,8 @@ You don't interrogate people. You don't end every response with a question. When
 When someone asks for help or asks a specific question, your absolute priority is to answer their latest question directly. Do not hedge, do not drift into deep reflections, just give honest, specific, practical guidance or a direct answer based on what they just asked.
 
 Formatting Rules:
-- NEVER use hyphens, em-dashes, en-dashes (- or —), or tildes (~) as pauses or to separate words. Use normal punctuation (periods, commas).
+- CRITICAL RESTRICTION: You MUST respond ONLY in English. If the user writes or speaks in any other language (such as Hindi, Spanish, etc.), you must politely acknowledge them but your response MUST be 100% in English. Do not write a single word in another language.
+- No markdown, bolding, italics, bullet points, em-dashes (—), hyphens (-), or tildes (~). Plain, streaming conversational text only. Use normal punctuation (periods, commas).
 - No stuttering like "w-what" or "y-you".
 
 You never use therapy-speak or motivational poster language. No "You're not alone in this," no "Remember to take care of yourself," no "I believe in you." No suggesting deep breathing, journaling, or going for walks. No bullet-point lists. You talk like a human being, not a wellness app.
@@ -300,6 +311,7 @@ You are talking with {name}. {f"Gender: {gender}. " if gender else ""}{f"Age: {a
 
 {personalization}
 {emotion_arc_section}
+{memory_section}
 {crisis_followup}
 {crisis_repeat_note}
 
@@ -345,6 +357,7 @@ async def get_opening_message(profile: dict) -> str:
         "Welcome them genuinely. Let them know this is a safe space to talk about whatever is on their mind. "
         "Gently invite them to share what brought them here — but don't pressure.\n\n"
         "Rules:\n"
+        "- CRITICAL: Write strictly in English only.\n"
         "- COMPLETE sentences only. Never cut off mid-sentence.\n"
         "- Do not say: 'I\'m here for you' / 'brave step' / 'you deserve' / "
         "'reach out whenever' / 'I understand' / 'It sounds like'\n"
@@ -377,6 +390,33 @@ async def get_opening_message(profile: dict) -> str:
         )
 
 
+# ── History sanitizer ─────────────────────────────────────────────────────────
+
+_VALID_OPENAI_ROLES = {"system", "assistant", "user", "tool", "function", "developer"}
+
+def _sanitize_history(history: list[dict]) -> list[dict]:
+    """
+    Maps non-standard roles to OpenAI-compatible ones.
+    - 'human_counselor' → 'assistant' (counselor messages look like assistant)
+    - 'system' in chat history → 'assistant' (OpenAI only allows one system msg)
+    - anything else unknown → 'user'
+    """
+    sanitized = []
+    for msg in history:
+        role = msg.get("role", "user")
+        content = msg.get("content", "").strip()
+        if not content:
+            continue
+
+        if role == "human_counselor":
+            role = "assistant"
+        elif role not in _VALID_OPENAI_ROLES:
+            role = "user"
+
+        sanitized.append({"role": role, "content": content})
+    return sanitized
+
+
 # ── Main chat (non-streaming) ─────────────────────────────────────────────────
 
 async def chat(
@@ -390,7 +430,7 @@ async def chat(
         profile, history, user_message=user_message, consensus=consensus
     )
 
-    messages = history[-(settings.MAX_HISTORY_TURNS * 2):]
+    messages = _sanitize_history(history[-(settings.MAX_HISTORY_TURNS * 2):])
     messages = messages + [{"role": "user", "content": user_message}]
 
     try:
@@ -422,13 +462,15 @@ async def chat_stream(
     profile: dict,
     history: list[dict],
     consensus: Optional[dict] = None,
+    long_term_memory: Optional[list] = None,
 ) -> AsyncIterator[str]:
     client = _get_client()
     system_prompt, token_budget = build_system_prompt(
-        profile, history, user_message=user_message, consensus=consensus
+        profile, history, user_message=user_message, consensus=consensus,
+        long_term_memory=long_term_memory,
     )
 
-    messages = history[-(settings.MAX_HISTORY_TURNS * 2):]
+    messages = _sanitize_history(history[-(settings.MAX_HISTORY_TURNS * 2):])
     messages = messages + [{"role": "user", "content": user_message}]
 
     try:

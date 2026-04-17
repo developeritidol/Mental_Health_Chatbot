@@ -1,3 +1,4 @@
+# app/api/routes/user.py
 """
 User Routes
 ────────────
@@ -6,19 +7,19 @@ POST /api/users/login
 """
 
 import re
-from typing import Optional, Literal
-from fastapi import APIRouter, HTTPException, Query, Depends
+from typing import  Literal
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import OAuth2PasswordRequestForm
 from datetime import datetime, timedelta
 from app.core.auth.oauth2 import get_current_user
 
 from app.api.schemas.request import (
-    ProfessionalRole,
-    PracticeType,
-    ConsultationMode,
     UserRole,
     VerifyOtpRequest,
     ResetPasswordRequest,
+    UserCreateRequest,
+    UserLoginRequest,
+    ForgotPasswordRequest,
 )
 from app.api.schemas.response import (
     UserSignupResponse,
@@ -33,7 +34,6 @@ from app.core.logger import get_logger
 from app.core.auth.hashing import Hash
 from app.core.auth.JWTtoken import create_access_token, create_refresh_token
 from app.services.email_service import generate_otp, validate_email, send_otp_email
-# from app.api.schemas.request import UserRole
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -107,26 +107,21 @@ def validate_account_status(user_doc: dict) -> None:
 # ── Routes ─────────────────────────────────────────────────────────────────
 
 @router.post("/register", response_model=UserSignupResponse)
-async def user_register(
-    username: str = Query(..., min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_]+$"),
-    email: str = Query(..., pattern=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"),
-    password: str = Query(..., min_length=8, max_length=128),
-    phone_number: str = Query(..., pattern=r"^\+?[1-9]\d{1,14}$"),
-    role: UserRole = Query(UserRole.user),          #  enum handles validation & normalization
-    professional_role: Optional[ProfessionalRole] = Query(None),
-    license_number: Optional[str] = Query(None, min_length=1, max_length=50),
-    state_of_licensure: Optional[str] = Query(None, min_length=1, max_length=50),
-    npi_number: Optional[str] = Query(None,max_length=10),
-    practice_type: Optional[PracticeType] = Query(None),
-    city: Optional[str] = Query(None, min_length=1, max_length=50),
-    state: Optional[str] = Query(None, min_length=1, max_length=50),
-    consultation_mode: Optional[ConsultationMode] = Query(None),
-):
-    """Register a normal user or admin using Query Parameters."""
+async def user_register(payload: UserCreateRequest):
+    """Register a user via JSON body with mandatory fields only."""
     try:
+        # Log incoming payload for debugging
+        logger.info(f" Registration attempt | Email: {payload.email} | Username: {payload.username}")
+        
         db = get_database()
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed. Please check MongoDB connection.")
+
+        # ── Input normalization ───────────────────────────────────────
+        full_name = payload.full_name.strip()
+        username = payload.username.strip().lower()
+        email = payload.email.strip().lower()
+        phone_number = payload.phone_number.strip()
 
         # ── Duplicate check ──────────────────────────────────────────
         existing = await db.users.find_one({
@@ -144,58 +139,30 @@ async def user_register(
             elif existing.get("username") == username:
                 raise HTTPException(status_code=400, detail="Username already taken")
 
-        # ── Role-based field validation ──────────────────────────────
-        role_value = role.value                     #  already "user" or "admin", clean
+        # ── Resolve role value ───────────────────────────────────────
+        role_value = payload.role.value if isinstance(payload.role, UserRole) else payload.role
 
-        params = {
-            "professional_role": professional_role,
-            "license_number": license_number,
-            "state_of_licensure": state_of_licensure,
-            "npi_number": npi_number,
-            "practice_type": practice_type,
-            "city": city,
-            "state": state,
-            "consultation_mode": consultation_mode,
-        }
-
-        required_fields = ADMIN_REQUIRED_FIELDS if role_value == "admin" else USER_REQUIRED_FIELDS
-        missing = [f for f in required_fields if params.get(f) is None]
-
-        if missing:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Missing required fields for role '{role_value}': {', '.join(missing)}"
-            )
-
-        # ── Clear admin-only fields for user role ────────────────────
-        if role_value == "user":
-            professional_role = None
-            license_number = None
-            state_of_licensure = None
-            npi_number = None
-            practice_type = None
-            consultation_mode = None
-
-        # ── Resolve enum values ──────────────────────────────────────
-        professional_role_value = professional_role.value if professional_role else None
-        practice_type_value = practice_type.value if practice_type else None
-        consultation_mode_value = consultation_mode.value if consultation_mode else None
+        # ── Resolve enum values for optional fields ──────────────────
+        professional_role_value = payload.professional_role.value if payload.professional_role else None
+        practice_type_value = payload.practice_type.value if payload.practice_type else None
+        consultation_mode_value = payload.consultation_mode.value if payload.consultation_mode else None
 
         # ── Save to DB ───────────────────────────────────────────────
-        password_hash = Hash.bcrypt(password)
+        password_hash = Hash.bcrypt(payload.password)
 
         user = UserModelDB(
+            full_name=full_name,
             username=username,
             email=email,
             password_hash=password_hash,
             phone_number=phone_number,
             professional_role=professional_role_value,
-            license_number=license_number,
-            state_of_licensure=state_of_licensure,
-            npi_number=npi_number,
+            license_number=payload.license_number,
+            state_of_licensure=payload.state_of_licensure,
+            npi_number=payload.npi_number,
             practice_type=practice_type_value,
-            city=city,
-            state=state,
+            city=payload.city,
+            state=payload.state,
             consultation_mode=consultation_mode_value,
             role=role_value,
         )
@@ -219,24 +186,25 @@ async def user_register(
 
 
 @router.post("/login", response_model=UserLoginResponse)
-async def user_login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-):
-    """Login using username, email, or phone number."""
+async def user_login(payload: UserLoginRequest):
+    """Login using username, email, or phone number via JSON body."""
     try:
+        # Log incoming payload for debugging
+        logger.info(f" Login attempt | Username: {payload.username}")
+        
         db = get_database()
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed. Please try again later.")
 
-        login_identifier = form_data.username
-        password = form_data.password
+        login_identifier = payload.username
+        password = payload.password
 
         if not password:
             raise HTTPException(status_code=400, detail="Password is required")
 
         user_doc = await find_user_by_identifier(db, login_identifier)
         if not user_doc:
-            logger.warning(f"Login attempt with non-existent identifier: {login_identifier}")
+            logger.warning(f"Login attempt with non-existent username: {login_identifier}")
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
         if not user_doc.get("password_hash"):
@@ -283,24 +251,26 @@ async def user_login(
         raise
     except Exception as e:
         logger.error(f" Login Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred during login.")
 
 
 @router.post("/forgot-password", response_model=ForgotPasswordResponse)
-async def forgot_password(
-    email: str = Query(..., description="User email address"),
-):
-    """Initiate password reset by sending OTP to email."""
+async def forgot_password(payload: ForgotPasswordRequest):
+    """Initiate password reset by sending OTP to email via JSON body."""
     try:
+        # Log incoming payload for debugging
+        logger.info(f" Forgot password request | Email: {payload.email}")
+        
         db = get_database()
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed.")
 
-        user_doc = await db.users.find_one({"email": email})
+        user_doc = await db.users.find_one({"email": payload.email})
         if not user_doc:
             raise HTTPException(status_code=404, detail="User not found")
 
-        if not validate_email(email):
+        if not validate_email(payload.email):
             raise HTTPException(status_code=400, detail="Invalid email address")
 
         otp = generate_otp()
@@ -311,10 +281,10 @@ async def forgot_password(
             {"$set": {"password_reset_token": otp, "password_reset_expires": expires_at}},
         )
 
-        if not await send_otp_email(email, otp):
+        if not await send_otp_email(payload.email, otp):
             raise HTTPException(status_code=500, detail="Failed to send OTP email")
 
-        logger.info(f"Password reset OTP sent to {email}")
+        logger.info(f" Password reset OTP sent to {payload.email}")
         return ForgotPasswordResponse(
             status="success",
             message="OTP sent to your email. Please check your inbox.",
@@ -323,7 +293,7 @@ async def forgot_password(
     except HTTPException as e:
         raise e
     except Exception as e:
-        logger.error(f"Forgot password error: {e}")
+        logger.error(f" Forgot password error: {e}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 

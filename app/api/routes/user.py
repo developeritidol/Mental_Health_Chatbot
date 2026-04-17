@@ -17,6 +17,8 @@ from app.api.schemas.request import (
     PracticeType,
     ConsultationMode,
     UserRole,
+    VerifyOtpRequest,
+    ResetPasswordRequest,
 )
 from app.api.schemas.response import (
     UserSignupResponse,
@@ -31,6 +33,7 @@ from app.core.logger import get_logger
 from app.core.auth.hashing import Hash
 from app.core.auth.JWTtoken import create_access_token, create_refresh_token
 from app.services.email_service import generate_otp, validate_email, send_otp_email
+# from app.api.schemas.request import UserRole
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -325,39 +328,55 @@ async def forgot_password(
 
 
 @router.post("/verify-otp", response_model=VerifyOtpResponse)
-async def verify_otp(
-    email: str = Query(..., description="User email address"),
-    otp: str = Query(..., min_length=6, max_length=6, description="6-digit OTP"),
-    user=Depends(get_current_user),
-):
+async def verify_otp(payload: VerifyOtpRequest):
     """Verify OTP for password reset."""
     try:
         db = get_database()
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed.")
 
-        user_doc = await db.users.find_one({"email": email})
+        # Find user by email
+        user_doc = await db.users.find_one({"email": payload.email})
         if not user_doc:
+            logger.warning(f"OTP verification attempt for non-existent email: {payload.email}")
             raise HTTPException(status_code=404, detail="User not found")
 
-        if not user_doc.get("password_reset_token"):
-            raise HTTPException(status_code=400, detail="No password reset request found")
+        # Strict Expiry Check
+        if not user_doc.get("password_reset_token") or not user_doc.get("password_reset_expires"):
+            logger.warning(f"No active password reset request found for {payload.email}")
+            raise HTTPException(status_code=400, detail="No active password reset request found.")
 
-        if user_doc["password_reset_token"] != otp:
-            raise HTTPException(status_code=401, detail="Invalid OTP")
-
+        # Check Expiration
         expires_at = user_doc.get("password_reset_expires")
         if expires_at and datetime.utcnow() > expires_at:
+            logger.warning(f"Expired OTP attempt for {payload.email}")
             await db.users.update_one(
                 {"_id": user_doc["_id"]},
                 {"$set": {"password_reset_token": None, "password_reset_expires": None}},
             )
-            raise HTTPException(status_code=408, detail="OTP has expired")
+            raise HTTPException(status_code=408, detail="OTP has expired. Please request a new one.")
 
-        logger.info(f"OTP verified for {email}")
+        # Validate Match
+        if user_doc["password_reset_token"] != payload.otp:
+            logger.warning(f"Invalid OTP attempt for {payload.email}")
+            raise HTTPException(status_code=401, detail="Invalid OTP.")
+
+        # Security Fix (Prevent Reuse)
+        await db.users.update_one(
+            {"_id": user_doc["_id"]},
+            {
+                "$set": {
+                    "is_otp_verified": True,
+                    "password_reset_token": None,
+                    "password_reset_expires": None
+                }
+            }
+        )
+
+        logger.info(f"OTP verified successfully for {payload.email}")
         return VerifyOtpResponse(
             status="success",
-            message="OTP verified successfully. You can now reset your password.",
+            message="OTP verified successfully",
         )
 
     except HTTPException as e:
@@ -368,48 +387,40 @@ async def verify_otp(
 
 
 @router.post("/reset-password", response_model=ResetPasswordResponse)
-async def reset_password(
-    email: str = Query(..., description="User email address"),
-    otp: str = Query(..., min_length=6, max_length=6, description="6-digit OTP"),
-    new_password: str = Query(..., min_length=8, max_length=128, description="New password"),
-    user=Depends(get_current_user),
-):
-    """Reset password using OTP."""
+async def reset_password(payload: ResetPasswordRequest):
+    """Reset password using verified OTP status."""
     try:
         db = get_database()
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed.")
 
-        user_doc = await db.users.find_one({"email": email})
+        # Find user by email
+        user_doc = await db.users.find_one({"email": payload.email})
         if not user_doc:
+            logger.warning(f"Password reset attempt for non-existent email: {payload.email}")
             raise HTTPException(status_code=404, detail="User not found")
 
-        if user_doc.get("password_reset_token") != otp:
-            raise HTTPException(status_code=401, detail="Invalid OTP")
+        # Verify Authorization
+        if user_doc.get("is_otp_verified") is not True:
+            logger.warning(f"Unauthorized reset attempt (OTP not verified) for {payload.email}")
+            raise HTTPException(status_code=403, detail="Access denied. Please verify your OTP first.")
 
-        expires_at = user_doc.get("password_reset_expires")
-        if expires_at and datetime.utcnow() > expires_at:
-            await db.users.update_one(
-                {"_id": user_doc["_id"]},
-                {"$set": {"password_reset_token": None, "password_reset_expires": None}},
-            )
-            raise HTTPException(status_code=408, detail="OTP has expired")
+        # Hash new password
+        new_password_hash = Hash.bcrypt(payload.new_password)
 
-        new_password_hash = Hash.bcrypt(new_password)
-
+        # Update Database & Lock Flow
         await db.users.update_one(
             {"_id": user_doc["_id"]},
             {
                 "$set": {
                     "password_hash": new_password_hash,
-                    "password_reset_token": None,
-                    "password_reset_expires": None,
                     "last_login": datetime.utcnow(),
+                    "is_otp_verified": False
                 }
-            },
+            }
         )
 
-        logger.info(f"Password reset successfully for {email}")
+        logger.info(f"Password reset successfully for {payload.email}")
         return ResetPasswordResponse(
             status="success",
             message="Password reset successfully. You can now login with your new password.",
@@ -420,3 +431,9 @@ async def reset_password(
     except Exception as e:
         logger.error(f"Password reset error: {e}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@router.post("/logout")
+async def user_logout(user = Depends(get_current_user)):
+    """Simple logout."""
+    return {"message": "Logout successful"}

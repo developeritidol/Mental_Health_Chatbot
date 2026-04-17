@@ -17,6 +17,9 @@ from pydantic_settings import BaseSettings
 from functools import lru_cache
 from app.core.logger import get_logger
 
+from dotenv import load_dotenv
+load_dotenv()
+
 logger = get_logger(__name__)
 
 
@@ -37,6 +40,7 @@ class Settings(BaseSettings):
     SYNTHESIZER_MODEL: str = "gpt-4o-mini"
 
     # ── Groq Whisper (STT) ───────────────────────────────────────────────────
+    GROQ_API_KEY: str = ""
     GROQ_WHISPER_MODEL: str = "whisper-large-v3"
 
     # ── HuggingFace Emotion Model ─────────────────────────────────────────────
@@ -54,10 +58,35 @@ class Settings(BaseSettings):
     # This value is a safety fallback ONLY — never used for normal chat flow.
     MAX_TOKENS: int = 300
 
+    # ── Server address (used to build WebSocket URLs) ─────────────────────────
+    SERVER_HOST: str = "localhost"
+    SERVER_PORT: int = 8000
+
+    # ── JWT Authentication ────────────────────────────────────────────────────
+    SECRET_KEY: str = ""  # Must be set via JWT_SECRET_KEY environment variable
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
     class Config:
         env_file          = ".env"
         env_file_encoding = "utf-8"
         extra             = "ignore"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Validate critical security configuration
+        if not self.SECRET_KEY:
+            raise ValueError(
+                "SECURITY ERROR: JWT_SECRET_KEY environment variable must be set. "
+                "This is required for secure authentication. "
+                "Generate a strong random secret and set it in your .env file."
+            )
+        if len(self.SECRET_KEY) < 32:
+            logger.warning(
+                "SECURITY WARNING: JWT_SECRET_KEY is shorter than 32 characters. "
+                "For production, use a longer, cryptographically secure random string."
+            )
 
 
 @lru_cache()

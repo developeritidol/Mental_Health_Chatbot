@@ -5,9 +5,10 @@ POST /api/audio/transcribe — accepts audio file, returns transcript via Groq W
 """
 
 import io
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from groq import AsyncGroq
 
+from app.core.auth.oauth2 import get_current_user
 from app.core.config import get_settings
 from app.api.schemas.response import TranscriptionResponse
 from app.core.logger import get_logger
@@ -23,7 +24,7 @@ ALLOWED_MIME = {
 
 
 @router.post("/transcribe", response_model=TranscriptionResponse)
-async def transcribe_audio(file: UploadFile = File(...)):
+async def transcribe_audio(file: UploadFile = File(...), user = Depends(get_current_user)):
     """
     Accepts an audio blob from the browser (MediaRecorder output, typically webm/ogg).
     Sends it to Groq's Whisper large-v3 model and returns the transcript.
@@ -50,6 +51,11 @@ async def transcribe_audio(file: UploadFile = File(...)):
         text = transcription.text.strip()
         language = getattr(transcription, "language", None)
         duration = getattr(transcription, "duration", None)
+
+        # Only allow English input. If another language is detected, wipe the text!
+        if language and language.lower() not in ["english", "en"]:
+            logger.warning(f"Rejected non-English audio. Detected: {language}")
+            text = ""
 
         logger.debug(f"Whisper transcript: '{text[:60]}...' lang={language}")
         logger.info("Transcription successful")

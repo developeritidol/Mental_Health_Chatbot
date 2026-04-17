@@ -16,6 +16,7 @@ from app.api.schemas.request import (
     PracticeType,
     ConsultationMode,
     VerifyOtpRequest,
+    ResetPasswordRequest,
 )
 from app.api.schemas.response import UserSignupResponse, UserLoginResponse, ForgotPasswordResponse, VerifyOtpResponse, ResetPasswordResponse
 from app.models.db import UserModelDB
@@ -247,17 +248,12 @@ async def verify_otp(payload: VerifyOtpRequest):
             logger.warning(f"OTP verification attempt for non-existent email: {payload.email}")
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Check if OTP exists
-        if not user_doc.get("password_reset_token"):
-            logger.warning(f"No OTP found for {payload.email}")
-            raise HTTPException(status_code=400, detail="No password reset request found")
+        # Strict Expiry Check
+        if not user_doc.get("password_reset_token") or not user_doc.get("password_reset_expires"):
+            logger.warning(f"No active password reset request found for {payload.email}")
+            raise HTTPException(status_code=400, detail="No active password reset request found.")
 
-        # Check if OTP matches
-        if user_doc["password_reset_token"] != payload.otp:
-            logger.warning(f"Invalid OTP attempt for {payload.email}")
-            raise HTTPException(status_code=401, detail="Invalid OTP")
-
-        # Check if OTP has expired
+        # Check Expiration
         expires_at = user_doc.get("password_reset_expires")
         if expires_at and datetime.utcnow() > expires_at:
             logger.warning(f"Expired OTP attempt for {payload.email}")
@@ -265,12 +261,23 @@ async def verify_otp(payload: VerifyOtpRequest):
                 {"_id": user_doc["_id"]},
                 {"$set": {"password_reset_token": None, "password_reset_expires": None}},
             )
-            raise HTTPException(status_code=408, detail="OTP has expired")
+            raise HTTPException(status_code=408, detail="OTP has expired. Please request a new one.")
 
-        # Mark OTP as verified
+        # Validate Match
+        if user_doc["password_reset_token"] != payload.otp:
+            logger.warning(f"Invalid OTP attempt for {payload.email}")
+            raise HTTPException(status_code=401, detail="Invalid OTP.")
+
+        # Security Fix (Prevent Reuse)
         await db.users.update_one(
             {"_id": user_doc["_id"]},
-            {"$set": {"is_otp_verified": True}}
+            {
+                "$set": {
+                    "is_otp_verified": True,
+                    "password_reset_token": None,
+                    "password_reset_expires": None
+                }
+            }
         )
 
         logger.info(f"OTP verified successfully for {payload.email}")
@@ -287,56 +294,40 @@ async def verify_otp(payload: VerifyOtpRequest):
 
 
 @router.post("/reset-password", response_model=ResetPasswordResponse)
-async def reset_password(
-    email: str = Query(..., description="User email address"),
-    otp: str = Query(..., description="6-digit OTP"),
-    new_password: str = Query(..., min_length=8, max_length=128, description="New password"),
-    #user = Depends(get_current_user)
-):
-    """Reset password using OTP."""
+async def reset_password(payload: ResetPasswordRequest):
+    """Reset password using verified OTP status."""
     try:
         db = get_database()
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed.")
 
         # Find user by email
-        user_doc = await db.users.find_one({"email": email})
+        user_doc = await db.users.find_one({"email": payload.email})
         if not user_doc:
-            logger.warning(f"Password reset attempt for non-existent email: {email}")
+            logger.warning(f"Password reset attempt for non-existent email: {payload.email}")
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Check if OTP matches
-        if user_doc.get("password_reset_token") != otp:
-            logger.warning(f"Invalid OTP in reset for {email}")
-            raise HTTPException(status_code=401, detail="Invalid OTP")
-
-        # Check if OTP has expired
-        expires_at = user_doc.get("password_reset_expires")
-        if expires_at and datetime.utcnow() > expires_at:
-            logger.warning(f"Expired OTP in reset for {email}")
-            await db.users.update_one(
-                {"_id": user_doc["_id"]},
-                {"$set": {"password_reset_token": None, "password_reset_expires": None}},
-            )
-            raise HTTPException(status_code=408, detail="OTP has expired")
+        # Verify Authorization
+        if user_doc.get("is_otp_verified") is not True:
+            logger.warning(f"Unauthorized reset attempt (OTP not verified) for {payload.email}")
+            raise HTTPException(status_code=403, detail="Access denied. Please verify your OTP first.")
 
         # Hash new password
-        new_password_hash = Hash.bcrypt(new_password)
+        new_password_hash = Hash.bcrypt(payload.new_password)
 
-        # Update password and clear OTP
+        # Update Database & Lock Flow
         await db.users.update_one(
             {"_id": user_doc["_id"]},
             {
                 "$set": {
                     "password_hash": new_password_hash,
-                    "password_reset_token": None,
-                    "password_reset_expires": None,
                     "last_login": datetime.utcnow(),
+                    "is_otp_verified": False
                 }
-            },
+            }
         )
 
-        logger.info(f"Password reset successfully for {email}")
+        logger.info(f"Password reset successfully for {payload.email}")
         return ResetPasswordResponse(
             status="success",
             message="Password reset successfully. You can now login with your new password.",

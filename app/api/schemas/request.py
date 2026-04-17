@@ -92,4 +92,9 @@ class AdminSignupRequest(BaseModel):
 
 class VerifyOtpRequest(BaseModel):
     email: str = Field(..., description="User email address")
-    otp: str = Field(..., min_length=6, max_length=6, description="6-digit OTP")
+    otp: str = Field(..., description="6-digit OTP")
+
+class ResetPasswordRequest(BaseModel):
+    email: str = Field(..., description="User email address")
+    new_password: str = Field(..., min_length=4, max_length=128, description="New password")
+

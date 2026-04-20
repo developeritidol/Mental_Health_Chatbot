@@ -1,14 +1,18 @@
 # app/api/routes/user.py
 """
 User Routes
-────────────
+-----------
 POST /api/users/register
 POST /api/users/login
+POST /api/users/forgot-password
+POST /api/users/verify-otp
+POST /api/users/reset-password
+POST /api/users/logout
 """
 
 import re
-from typing import  Literal
-from fastapi import APIRouter, HTTPException, Depends
+from typing import Literal
+from fastapi import APIRouter, HTTPException, Depends , Form
 from fastapi.security import OAuth2PasswordRequestForm
 from datetime import datetime, timedelta
 from app.core.auth.oauth2 import get_current_user
@@ -39,24 +43,14 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/users", tags=["users"])
 
 
-# ── Constants ──────────────────────────────────────────────────────────────
-
-ADMIN_REQUIRED_FIELDS = [
-    "professional_role", "license_number", "state_of_licensure",
-    "npi_number", "practice_type", "city", "state", "consultation_mode"
-]
-
-USER_REQUIRED_FIELDS = ["city", "state"]
-
-
-# ── Helper Functions ───────────────────────────────────────────────────────
+# ── Helper Functions ───────────────────────────────────────────────────────────
 
 def detect_identifier_type(identifier: str) -> Literal["email", "phone", "username"]:
     email_pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
     if re.match(email_pattern, identifier):
         return "email"
 
-    phone_pattern = r"^\+?[1-9]\d{1,10}$"
+    phone_pattern = r"^\+?[1-9]\d{1,14}$"
     if re.match(phone_pattern, identifier):
         return "phone"
 
@@ -74,9 +68,9 @@ async def find_user_by_identifier(db, identifier: str):
         return None
 
     query_map = {
-        "email": {"email": identifier},
-        "phone": {"phone_number": identifier},
-        "username": {"username": identifier}
+        "email":    {"email": identifier},
+        "phone":    {"phone_number": identifier},
+        "username": {"username": identifier},
     }
     return await db.users.find_one(query_map[identifier_type])
 
@@ -84,51 +78,47 @@ async def find_user_by_identifier(db, identifier: str):
 def validate_user_role(role: str) -> str:
     if not role:
         raise HTTPException(status_code=400, detail="Role is required")
-
-    normalized_role = role.strip().lower()
-
-    if normalized_role not in {"user", "admin"}:
+    normalized = role.strip().lower()
+    if normalized not in {"user", "admin"}:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid role '{role}'. Allowed roles: admin, user"
+            detail=f"Invalid role '{role}'. Allowed: admin, user",
         )
-
-    return normalized_role
+    return normalized
 
 
 def validate_account_status(user_doc: dict) -> None:
     if not user_doc.get("is_active", True):
         raise HTTPException(
             status_code=403,
-            detail="Account is disabled. Please contact support for assistance."
+            detail="Account is disabled. Please contact support for assistance.",
         )
 
 
-# ── Routes ─────────────────────────────────────────────────────────────────
+# ── Routes ─────────────────────────────────────────────────────────────────────
 
 @router.post("/register", response_model=UserSignupResponse)
 async def user_register(payload: UserCreateRequest):
-    """Register a user via JSON body with mandatory fields only."""
+    """Register a new user via JSON body."""
     try:
-        # Log incoming payload for debugging
         logger.info(f" Registration attempt | Email: {payload.email} | Username: {payload.username}")
-        
+
         db = get_database()
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed. Please check MongoDB connection.")
 
-        # ── Input normalization ───────────────────────────────────────
-        full_name = payload.full_name.strip()
-        username = payload.username.strip().lower()
-        email = payload.email.strip().lower()
+        # Input normalisation
+        full_name    = payload.full_name.strip()
+        username     = payload.username.strip().lower()
+        email        = payload.email.strip().lower()
         phone_number = payload.phone_number.strip()
 
-        # ── Duplicate check ──────────────────────────────────────────
+        # Duplicate check
         existing = await db.users.find_one({
             "$or": [
                 {"email": email},
                 {"phone_number": phone_number},
-                {"username": username}
+                {"username": username},
             ]
         })
         if existing:
@@ -139,15 +129,13 @@ async def user_register(payload: UserCreateRequest):
             elif existing.get("username") == username:
                 raise HTTPException(status_code=400, detail="Username already taken")
 
-        # ── Resolve role value ───────────────────────────────────────
-        role_value = payload.role.value if isinstance(payload.role, UserRole) else payload.role
+        # Resolve enum values
+        role_value                = payload.role.value if isinstance(payload.role, UserRole) else payload.role
+        professional_role_value   = payload.professional_role.value if payload.professional_role else None
+        practice_type_value       = payload.practice_type.value if payload.practice_type else None
+        consultation_mode_value   = payload.consultation_mode.value if payload.consultation_mode else None
 
-        # ── Resolve enum values for optional fields ──────────────────
-        professional_role_value = payload.professional_role.value if payload.professional_role else None
-        practice_type_value = payload.practice_type.value if payload.practice_type else None
-        consultation_mode_value = payload.consultation_mode.value if payload.consultation_mode else None
-
-        # ── Save to DB ───────────────────────────────────────────────
+        # Hash password and persist
         password_hash = Hash.bcrypt(payload.password)
 
         user = UserModelDB(
@@ -167,7 +155,7 @@ async def user_register(payload: UserCreateRequest):
             role=role_value,
         )
 
-        result = await db.users.insert_one(user.dict(by_alias=True, exclude_none=True))
+        result  = await db.users.insert_one(user.dict(by_alias=True, exclude_none=True))
         user_id = str(result.inserted_id)
 
         logger.info(f" User Registered: {email} | Role: {role_value} | ID: {user_id}")
@@ -185,83 +173,129 @@ async def user_register(payload: UserCreateRequest):
         raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
 
+# @router.post("/login", response_model=UserLoginResponse)
+# async def user_login(payload: UserLoginRequest):
+#     """Login using username, email, or phone number via JSON body."""
+#     try:
+#         logger.info(f" Login attempt | Identifier: {payload.username}")
+
+#         db = get_database()
+#         if db is None:
+#             raise HTTPException(status_code=503, detail="Database connection failed. Please try again later.")
+
+#         login_identifier = payload.username
+#         password         = payload.password
+
+#         if not password:
+#             raise HTTPException(status_code=400, detail="Password is required")
+
+#         user_doc = await find_user_by_identifier(db, login_identifier)
+#         if not user_doc:
+#             logger.warning(f"Login attempt with non-existent identifier: {login_identifier}")
+#             raise HTTPException(status_code=401, detail="Invalid credentials")
+
+#         if not user_doc.get("password_hash"):
+#             logger.error(f"User {login_identifier} has no password hash stored")
+#             raise HTTPException(status_code=500, detail="Account configuration error. Please contact support.")
+
+#         if not Hash.verify(user_doc["password_hash"], password):
+#             logger.warning(f"Invalid password attempt for: {login_identifier}")
+#             raise HTTPException(status_code=401, detail="Invalid credentials")
+
+#         user_role = user_doc.get("role", "user")
+#         try:
+#             validate_user_role(user_role)
+#         except HTTPException:
+#             logger.error(f"User {login_identifier} has invalid role: {user_role}")
+#             raise HTTPException(status_code=403, detail="Account configuration error. Please contact support.")
+
+#         validate_account_status(user_doc)
+
+#         await db.users.update_one(
+#             {"_id": user_doc["_id"]},
+#             {"$set": {"last_login": datetime.utcnow()}},
+#         )
+
+#         user_data = {k: v for k, v in user_doc.items() if k not in ["password_hash", "_id"]}
+#         user_data["user_id"] = str(user_doc["_id"])
+
+#         token_subject = user_doc.get("email") or user_doc.get("username") or str(user_doc["_id"])
+#         access_token  = create_access_token(data={"sub": token_subject, "role": user_role})
+#         refresh_token = create_refresh_token(data={"sub": token_subject})
+
+#         identifier_type = detect_identifier_type(login_identifier)
+#         logger.info(
+#             f" Login Successful | Type: {identifier_type} | ID: {login_identifier} "
+#             f"| Role: {user_role} | UID: {user_data['user_id']}"
+#         )
+
+#         return UserLoginResponse(
+#             status="success",
+#             message="Login successful",
+#             user=user_data,
+#             access_token=access_token,
+#             refresh_token=refresh_token,
+#         )
+
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.error(f" Login Error: {str(e)}", exc_info=True)
+#         raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
+
+
 @router.post("/login", response_model=UserLoginResponse)
-async def user_login(payload: UserLoginRequest):
-    """Login using username, email, or phone number via JSON body."""
+async def user_login(
+    username: str = Form(...), # This forces FastAPI to read from Form data
+    password: str = Form(...)  # This forces FastAPI to read from Form data
+):
+    """Login using Form Data to support Swagger UI and OAuth2 flows."""
     try:
-        # Log incoming payload for debugging
-        logger.info(f" Login attempt | Username: {payload.username}")
-        
         db = get_database()
-        if db is None:
-            raise HTTPException(status_code=503, detail="Database connection failed. Please try again later.")
-
-        login_identifier = payload.username
-        password = payload.password
-
-        if not password:
-            raise HTTPException(status_code=400, detail="Password is required")
-
-        user_doc = await find_user_by_identifier(db, login_identifier)
-        if not user_doc:
-            logger.warning(f"Login attempt with non-existent username: {login_identifier}")
+        # username here will contain "jigar@gmail.com" from your screenshot
+        user_doc = await find_user_by_identifier(db, username)
+        
+        if not user_doc or not Hash.verify(user_doc["password_hash"], password):
+            # If this hits, you'll see a 401 'Invalid credentials' instead of 422
             raise HTTPException(status_code=401, detail="Invalid credentials")
-
-        if not user_doc.get("password_hash"):
-            logger.error(f"User {login_identifier} has no password hash")
-            raise HTTPException(status_code=500, detail="Account configuration error. Please contact support.")
-
-        if not Hash.verify(user_doc["password_hash"], password):
-            logger.warning(f"Invalid password attempt for: {login_identifier}")
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-
-        user_role = user_doc.get("role", "user")
-        try:
-            validate_user_role(user_role)
-        except HTTPException:
-            logger.error(f"User {login_identifier} has invalid role: {user_role}")
-            raise HTTPException(status_code=403, detail="Account configuration error. Please contact support.")
 
         validate_account_status(user_doc)
 
+        # Update last login
         await db.users.update_one(
             {"_id": user_doc["_id"]},
             {"$set": {"last_login": datetime.utcnow()}}
         )
 
-        user_data = {k: v for k, v in user_doc.items() if k not in ["password_hash", "_id"]}
-        user_data["user_id"] = str(user_doc["_id"])
-
-        token_subject = user_doc.get("email") or user_doc.get("username") or str(user_doc["_id"])
-        access_token = create_access_token(data={"sub": token_subject, "role": user_role})
+        # Generate Tokens
+        token_subject = user_doc.get("email") or user_doc.get("username")
+        access_token = create_access_token(data={"sub": token_subject, "role": user_doc.get("role")})
         refresh_token = create_refresh_token(data={"sub": token_subject})
 
-        identifier_type = detect_identifier_type(login_identifier)
-        logger.info(f" Login | Type: {identifier_type} | ID: {login_identifier} | Role: {user_role} | UID: {user_data['user_id']}")
+        # Format user info for response
+        user_info = {k: v for k, v in user_doc.items() if k not in ["password_hash", "_id"]}
+        user_info["user_id"] = str(user_doc["_id"])
 
         return UserLoginResponse(
             status="success",
             message="Login successful",
-            user=user_data,
+            user=user_info,
             access_token=access_token,
-            refresh_token=refresh_token,
+            refresh_token=refresh_token
         )
 
-    except HTTPException:
-        raise
+    except HTTPException as e:
+        raise e
     except Exception as e:
-        logger.error(f" Login Error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
-        raise HTTPException(status_code=500, detail="An unexpected error occurred during login.")
-
+        logger.error(f"Login Error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.post("/forgot-password", response_model=ForgotPasswordResponse)
 async def forgot_password(payload: ForgotPasswordRequest):
-    """Initiate password reset by sending OTP to email via JSON body."""
+    """Initiate password reset by sending OTP to email."""
     try:
-        # Log incoming payload for debugging
         logger.info(f" Forgot password request | Email: {payload.email}")
-        
+
         db = get_database()
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed.")
@@ -273,7 +307,7 @@ async def forgot_password(payload: ForgotPasswordRequest):
         if not validate_email(payload.email):
             raise HTTPException(status_code=400, detail="Invalid email address")
 
-        otp = generate_otp()
+        otp        = generate_otp()
         expires_at = datetime.utcnow() + timedelta(minutes=30)
 
         await db.users.update_one(
@@ -305,18 +339,15 @@ async def verify_otp(payload: VerifyOtpRequest):
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed.")
 
-        # Find user by email
         user_doc = await db.users.find_one({"email": payload.email})
         if not user_doc:
             logger.warning(f"OTP verification attempt for non-existent email: {payload.email}")
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Strict Expiry Check
         if not user_doc.get("password_reset_token") or not user_doc.get("password_reset_expires"):
             logger.warning(f"No active password reset request found for {payload.email}")
             raise HTTPException(status_code=400, detail="No active password reset request found.")
 
-        # Check Expiration
         expires_at = user_doc.get("password_reset_expires")
         if expires_at and datetime.utcnow() > expires_at:
             logger.warning(f"Expired OTP attempt for {payload.email}")
@@ -326,28 +357,21 @@ async def verify_otp(payload: VerifyOtpRequest):
             )
             raise HTTPException(status_code=408, detail="OTP has expired. Please request a new one.")
 
-        # Validate Match
         if user_doc["password_reset_token"] != payload.otp:
             logger.warning(f"Invalid OTP attempt for {payload.email}")
             raise HTTPException(status_code=401, detail="Invalid OTP.")
 
-        # Security Fix (Prevent Reuse)
         await db.users.update_one(
             {"_id": user_doc["_id"]},
-            {
-                "$set": {
-                    "is_otp_verified": True,
-                    "password_reset_token": None,
-                    "password_reset_expires": None
-                }
-            }
+            {"$set": {
+                "is_otp_verified":        True,
+                "password_reset_token":   None,
+                "password_reset_expires": None,
+            }},
         )
 
         logger.info(f"OTP verified successfully for {payload.email}")
-        return VerifyOtpResponse(
-            status="success",
-            message="OTP verified successfully",
-        )
+        return VerifyOtpResponse(status="success", message="OTP verified successfully")
 
     except HTTPException as e:
         raise e
@@ -364,30 +388,24 @@ async def reset_password(payload: ResetPasswordRequest):
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed.")
 
-        # Find user by email
         user_doc = await db.users.find_one({"email": payload.email})
         if not user_doc:
             logger.warning(f"Password reset attempt for non-existent email: {payload.email}")
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Verify Authorization
         if user_doc.get("is_otp_verified") is not True:
             logger.warning(f"Unauthorized reset attempt (OTP not verified) for {payload.email}")
             raise HTTPException(status_code=403, detail="Access denied. Please verify your OTP first.")
 
-        # Hash new password
         new_password_hash = Hash.bcrypt(payload.new_password)
 
-        # Update Database & Lock Flow
         await db.users.update_one(
             {"_id": user_doc["_id"]},
-            {
-                "$set": {
-                    "password_hash": new_password_hash,
-                    "last_login": datetime.utcnow(),
-                    "is_otp_verified": False
-                }
-            }
+            {"$set": {
+                "password_hash":  new_password_hash,
+                "last_login":     datetime.utcnow(),
+                "is_otp_verified": False,
+            }},
         )
 
         logger.info(f"Password reset successfully for {payload.email}")
@@ -404,6 +422,6 @@ async def reset_password(payload: ResetPasswordRequest):
 
 
 @router.post("/logout")
-async def user_logout(user = Depends(get_current_user)):
-    """Simple logout."""
+async def user_logout(user=Depends(get_current_user)):
+    """Invalidate the current session."""
     return {"message": "Logout successful"}

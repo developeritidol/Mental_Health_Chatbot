@@ -64,16 +64,14 @@ class Settings(BaseSettings):
     SERVER_PORT: int = 8000
 
     # ── JWT Authentication ────────────────────────────────────────────────────
-    # Changed by Jigar Rohit: Fixed environment variable mapping from SECRET_KEY to JWT_SECRET_KEY
-    # SECRET_KEY: str = Field(
-    #     ...,
-    #     min_length=32,
-    #     validation_alias="JWT_SECRET_KEY",
-    #     description="Must be set via JWT_SECRET_KEY environment variable"
-    # )
-    # ALGORITHM: str = "HS256"
-    # ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    # REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    SECRET_KEY: str = Field(
+        default="changeme-use-a-real-secret-in-production",
+        validation_alias="JWT_SECRET_KEY",
+        description="Set via JWT_SECRET_KEY environment variable"
+    )
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     class Config:
         env_file          = ".env"

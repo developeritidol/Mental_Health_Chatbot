@@ -2,7 +2,7 @@
 Chat Route
 ──────────
 POST /api/chat/stream — SSE streaming chat.
-Android sends only: session_id, device_id, message.
+Android sends only: session_id, user_id, message.
 Server loads profile and full history from MongoDB.
 """
 
@@ -11,6 +11,9 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
+from app.core.database import get_database
+from app.api.routes.human import manager
+from app.core.config import get_settings
 from app.api.schemas.request import StreamChatRequest
 from app.api.schemas.response import ChatHistoryResponse, ChatMessageResponse, SessionListResponse, SessionResponse
 from app.core.auth.oauth2 import get_current_user
@@ -91,7 +94,6 @@ async def stream_message(req: StreamChatRequest, user = Depends(get_current_user
     # 1b. Guard: If this session is currently escalated to a human,
     #     block AI and redirect Android back to the WebSocket.
     if await is_user_escalated(req.user_id):
-        from app.core.config import get_settings
         _settings = get_settings()
         ws_url = f"ws://{_settings.SERVER_HOST}:{_settings.SERVER_PORT}/api/human/chat/{req.user_id}"
 
@@ -127,7 +129,7 @@ async def stream_message(req: StreamChatRequest, user = Depends(get_current_user
     # 3. Generate embedding and retrieve long-term memory (RAG)
     query_vector = await generate_embedding(req.message)
     long_term_memory = await retrieve_long_term_memory(
-        device_id=req.user_id,
+        user_id=req.user_id,
         query_vector=query_vector,
         exclude_session_id=actual_session_id,
     )
@@ -180,7 +182,7 @@ async def stream_message(req: StreamChatRequest, user = Depends(get_current_user
         logger.warning(f"[ESCALATION] Crisis detected for user {req.user_id}. Escalating in background and streaming AI response consistently.")
         await escalate_session(actual_session_id)
         
-        from app.api.routes.human import manager
+        
         await manager.broadcast_to_dashboard({
             "type": "new_escalation",
             "session_id": actual_session_id,
@@ -261,7 +263,6 @@ async def get_chat_history(current_user = Depends(get_current_user)):
     Returns ALL messages for the authenticated user, sorted chronologically.
     Used by Android to load conversation history when opening a session.
     """
-    from app.core.database import get_database
     db = get_database()
     if not db:
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -276,7 +277,7 @@ async def get_chat_history(current_user = Depends(get_current_user)):
         if doc.get("content"):
             formatted_messages.append(
                 ChatMessageResponse(
-                    device_id=doc.get("user_id", user_id),
+                    user_id=doc.get("user_id", user_id),
                     role=doc.get("role", "unknown"),
                     content=doc.get("content", ""),
                     timestamp=doc.get("timestamp").replace(tzinfo=timezone.utc) if doc.get("timestamp") else None
@@ -285,7 +286,7 @@ async def get_chat_history(current_user = Depends(get_current_user)):
 
     return ChatHistoryResponse(
         status="success",
-        device_id=user_id,
+        user_id=user_id,
         total_messages=len(formatted_messages),
         messages=formatted_messages,
     )
@@ -299,7 +300,7 @@ async def get_user_sessions(current_user = Depends(get_current_user)):
     Returns ALL sessions for the authenticated user, sorted newest first.
     Used by Android to list all past conversations when the app is reopened.
     """
-    from app.core.database import get_database
+    
     db = get_database()
     if not db:
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -313,7 +314,7 @@ async def get_user_sessions(current_user = Depends(get_current_user)):
     for doc in docs:
         sessions.append({
             "session_id": doc.get("session_id"),
-            "device_id": doc.get("user_id", user_id),
+            "user_id": doc.get("user_id", user_id),
             "is_active": doc.get("is_active", False),
             "is_escalated": doc.get("is_escalated", False),
             "created_at": doc.get("created_at").replace(tzinfo=timezone.utc) if doc.get("created_at") else None,
@@ -327,7 +328,7 @@ async def get_user_sessions(current_user = Depends(get_current_user)):
 
     return SessionListResponse(
         status="success",
-        device_id=user_id,
+        user_id=user_id,
         total_sessions=len(formatted_sessions),
         sessions=formatted_sessions,
     )

@@ -69,30 +69,6 @@ class StreamChatRequest(BaseModel):
     user_id: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1, max_length=2000)
 
-
-# ── Admin Schemas ────────────────────────────────────────────────────────────
-# class AdminSignupRequest(BaseModel):
-#     full_name: str = Field(..., min_length=1, max_length=100)
-#     email: str = Field(
-#         ..., 
-#         pattern=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$",
-#         description="Valid email address"
-#     )
-#     password: str = Field(..., min_length=8, max_length=128)
-#     phone_number: str = Field(
-#         ..., 
-#         pattern=r"^\+?[1-9]\d{1,14}$",
-#         description="International phone number"
-#     )
-#     professional_role: ProfessionalRole = Field(...)
-#     license_number: str = Field(..., min_length=1, max_length=50)
-#     state_of_licensure: str = Field(..., min_length=1, max_length=50)
-#     npi_number: str = Field(..., min_length=10, max_length=10)
-#     practice_type: PracticeType = Field(...)
-#     city: str = Field(..., min_length=1, max_length=50)
-#     state: str = Field(..., min_length=1, max_length=50)
-#     consultation_mode: ConsultationMode = Field(...)
-
 class VerifyOtpRequest(BaseModel):
     email: str = Field(..., description="User email address")
     otp: str = Field(..., description="6-digit OTP")

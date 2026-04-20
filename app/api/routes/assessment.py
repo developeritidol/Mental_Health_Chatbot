@@ -16,6 +16,8 @@ from app.services import llm as llm_svc
 from app.core.logger import get_logger
 from app.core.auth.oauth2 import get_current_user
 from app.core.database import get_database
+from app.services.db_service import build_personality_summary
+from app.services.db_service import save_message
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/assessment", tags=["assessment"])
@@ -41,7 +43,7 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
     profile_dict = req.profile.model_dump()
     personality_dict = req.personality_answers.model_dump()
 
-    from app.services.db_service import build_personality_summary
+
     personality_summary = build_personality_summary(personality_dict)
 
     update_doc = {
@@ -81,7 +83,7 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
             session_id=session_id,
             opening_message="Welcome back! How are you feeling today?",
             timestamp=datetime.now(timezone.utc),
-            device_id=user_id,
+            user_id=user_id,
         )
 
     # 3. No session exists — create a new one
@@ -112,11 +114,10 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
     opening = await llm_svc.get_opening_message(llm_profile)
 
     # 5. Save opening message to DB so it's in the history
-    from app.services.db_service import save_message
     await save_message({
         "session_id": session_id,
         "user_id": user_id,
-        "device_id": user_id, # maintaining backward compatibility in db service
+        "user_id": user_id, # maintaining backward compatibility in db service
         "turn_number": 0,
         "role": "assistant",
         "content": opening,
@@ -129,5 +130,5 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
         session_id=session_id,
         opening_message=opening,
         timestamp=datetime.now(timezone.utc),
-        device_id=user_id,
+        user_id=user_id,
     )

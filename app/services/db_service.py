@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from openai import AsyncOpenAI
 from app.core.database import get_database
 from app.core.config import get_settings
+from datetime import timedelta
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -613,7 +614,6 @@ async def get_expired_escalated_sessions(timeout_minutes: int) -> List[Dict[str,
     if db is None:
         return []
 
-    from datetime import timedelta
     expiration_time = datetime.now(timezone.utc) - timedelta(minutes=timeout_minutes)
 
     try:

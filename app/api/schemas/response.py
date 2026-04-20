@@ -10,7 +10,7 @@ class AssessmentResponse(BaseModel):
     session_id: str
     opening_message: str
     timestamp: datetime
-    device_id: str
+    user_id: str
 
 
 # ── Chat stream metadata (sent as final SSE event) ───────────────────────────
@@ -28,7 +28,7 @@ class EmotionData(BaseModel):
 # ── Chat history API ─────────────────────────────────────────────────────────
 
 class ChatMessageResponse(BaseModel):
-    device_id: str
+    user_id: str
     role: str
     content: str
     timestamp: datetime
@@ -36,7 +36,7 @@ class ChatMessageResponse(BaseModel):
 
 class ChatHistoryResponse(BaseModel):
     status: str
-    device_id: str
+    user_id: str
     total_messages: int
     messages: list[ChatMessageResponse]
 
@@ -45,7 +45,7 @@ class ChatHistoryResponse(BaseModel):
 
 class SessionResponse(BaseModel):
     session_id: str
-    device_id: str
+    user_id: str
     is_active: bool
     is_escalated: bool
     created_at: Optional[datetime] = None
@@ -54,7 +54,7 @@ class SessionResponse(BaseModel):
 
 class SessionListResponse(BaseModel):
     status: str
-    device_id: str
+    user_id: str
     total_sessions: int
     sessions: list[SessionResponse]
 
@@ -63,7 +63,7 @@ class SessionListResponse(BaseModel):
 
 class EscalatedSessionResponse(BaseModel):
     session_id: str
-    device_id: str
+    user_id: str
     first_name: str = "Unknown"
     last_name: Optional[str] = None
     username: Optional[str] = None

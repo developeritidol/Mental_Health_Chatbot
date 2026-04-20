@@ -12,10 +12,10 @@ POST /api/users/logout
 
 import re
 from typing import Literal
-from fastapi import APIRouter, HTTPException, Depends , Form
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi import APIRouter, HTTPException, Depends
 from datetime import datetime, timedelta
 from app.core.auth.oauth2 import get_current_user
+from app.core.auth.oauth2 import get_token
 
 from app.api.schemas.request import (
     UserRole,
@@ -24,19 +24,23 @@ from app.api.schemas.request import (
     UserCreateRequest,
     UserLoginRequest,
     ForgotPasswordRequest,
+    RefreshTokenRequest,
 )
 from app.api.schemas.response import (
     UserSignupResponse,
     UserLoginResponse,
     ForgotPasswordResponse,
     VerifyOtpResponse,
+    RefreshTokenResponse,
+    LogoutResponse,
     ResetPasswordResponse,
 )
 from app.models.db import UserModelDB
 from app.core.database import get_database
 from app.core.logger import get_logger
 from app.core.auth.hashing import Hash
-from app.core.auth.JWTtoken import create_access_token, create_refresh_token
+from app.core.auth.JWTtoken import create_access_token, create_refresh_token, verify_refresh_token
+from app.core.auth.token_blacklist import add_to_blacklist
 from app.services.email_service import generate_otp, validate_email, send_otp_email
 
 logger = get_logger(__name__)
@@ -245,50 +249,74 @@ async def user_register(payload: UserCreateRequest):
 
 
 @router.post("/login", response_model=UserLoginResponse)
-async def user_login(
-    username: str = Form(...), # This forces FastAPI to read from Form data
-    password: str = Form(...)  # This forces FastAPI to read from Form data
-):
-    """Login using Form Data to support Swagger UI and OAuth2 flows."""
+async def user_login(payload: UserLoginRequest):
+    """Login using username, email, or phone number via JSON body."""
     try:
+        logger.info(f" Login attempt | Identifier: {payload.username}")
+
         db = get_database()
-        # username here will contain "jigar@gmail.com" from your screenshot
-        user_doc = await find_user_by_identifier(db, username)
-        
-        if not user_doc or not Hash.verify(user_doc["password_hash"], password):
-            # If this hits, you'll see a 401 'Invalid credentials' instead of 422
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database connection failed. Please try again later.")
+
+        login_identifier = payload.username
+        password = payload.password
+
+        if not password:
+            raise HTTPException(status_code=400, detail="Password is required")
+
+        user_doc = await find_user_by_identifier(db, login_identifier)
+        if not user_doc:
+            logger.warning(f"Login attempt with non-existent identifier: {login_identifier}")
             raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        if not user_doc.get("password_hash"):
+            logger.error(f"User {login_identifier} has no password hash stored")
+            raise HTTPException(status_code=500, detail="Account configuration error. Please contact support.")
+
+        if not Hash.verify(user_doc["password_hash"], password):
+            logger.warning(f"Invalid password attempt for: {login_identifier}")
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        user_role = user_doc.get("role", "user")
+        try:
+            validate_user_role(user_role)
+        except HTTPException:
+            logger.error(f"User {login_identifier} has invalid role: {user_role}")
+            raise HTTPException(status_code=403, detail="Account configuration error. Please contact support.")
 
         validate_account_status(user_doc)
 
-        # Update last login
         await db.users.update_one(
             {"_id": user_doc["_id"]},
-            {"$set": {"last_login": datetime.utcnow()}}
+            {"$set": {"last_login": datetime.utcnow()}},
         )
 
-        # Generate Tokens
-        token_subject = user_doc.get("email") or user_doc.get("username")
-        access_token = create_access_token(data={"sub": token_subject, "role": user_doc.get("role")})
+        user_data = {k: v for k, v in user_doc.items() if k not in ["password_hash", "_id"]}
+        user_data["user_id"] = str(user_doc["_id"])
+
+        token_subject = user_doc.get("email") or user_doc.get("username") or str(user_doc["_id"])
+        access_token = create_access_token(data={"sub": token_subject, "role": user_role})
         refresh_token = create_refresh_token(data={"sub": token_subject})
 
-        # Format user info for response
-        user_info = {k: v for k, v in user_doc.items() if k not in ["password_hash", "_id"]}
-        user_info["user_id"] = str(user_doc["_id"])
+        identifier_type = detect_identifier_type(login_identifier)
+        logger.info(
+            f" Login Successful | Type: {identifier_type} | ID: {login_identifier} "
+            f"| Role: {user_role} | UID: {user_data['user_id']}"
+        )
 
         return UserLoginResponse(
             status="success",
             message="Login successful",
-            user=user_info,
+            user=user_data,
             access_token=access_token,
-            refresh_token=refresh_token
+            refresh_token=refresh_token,
         )
 
-    except HTTPException as e:
-        raise e
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Login Error: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(f" Login Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
 
 @router.post("/forgot-password", response_model=ForgotPasswordResponse)
 async def forgot_password(payload: ForgotPasswordRequest):
@@ -421,7 +449,62 @@ async def reset_password(payload: ResetPasswordRequest):
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
-@router.post("/logout")
-async def user_logout(user=Depends(get_current_user)):
-    """Invalidate the current session."""
-    return {"message": "Logout successful"}
+@router.post("/refresh", response_model=RefreshTokenResponse)
+async def refresh_token(payload: RefreshTokenRequest):
+    """Refresh access token using a valid refresh token."""
+    try:
+        logger.info(" Refresh token attempt")
+
+        credentials_exception = HTTPException(
+            status_code=401,
+            detail="Invalid refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+        token_data = verify_refresh_token(payload.refresh_token, credentials_exception)
+
+        # Get user from database to fetch role
+        db = get_database()
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database connection failed")
+
+        user_doc = await db.users.find_one({"email": token_data.useremail})
+        if not user_doc:
+            raise HTTPException(status_code=401, detail="User not found")
+
+        user_role = user_doc.get("role", "user")
+        token_subject = user_doc.get("email") or user_doc.get("username")
+
+        # Generate new access token
+        access_token = create_access_token(data={"sub": token_subject, "role": user_role})
+
+        logger.info(f" Access token refreshed for: {token_data.useremail}")
+
+        return RefreshTokenResponse(
+            status="success",
+            access_token=access_token,
+            token_type="bearer"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f" Refresh token error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Token refresh failed: {str(e)}")
+
+
+@router.post("/logout", response_model=LogoutResponse)
+async def user_logout(
+    token: str = Depends(get_token),
+    user = Depends(get_current_user)
+):
+    try:
+        add_to_blacklist(token)
+
+        return LogoutResponse(
+            status="success",
+            message="Logout successful"
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

@@ -2,9 +2,11 @@ import os
 from datetime import datetime, timedelta
 
 from jose import JWTError, jwt, ExpiredSignatureError
-
+# from app.core.auth.token_blacklist import is_blacklisted
 from app.api.schemas.response import TokenData
 from app.core.config import get_settings
+# from app.core.auth.token_blacklist import is_token_blacklisted
+from app.core.auth.token_blacklist import is_blacklisted
 from fastapi import HTTPException
 
 
@@ -39,6 +41,14 @@ def create_refresh_token(data: dict):
 def verify_refresh_token(token: str, credentials_exception):
     """Verify refresh token specifically"""
     settings = get_settings()
+    
+    # Check if token is blacklisted
+    if is_blacklisted(token):
+        raise HTTPException(
+            status_code=401,
+            detail="Refresh token has been revoked. Please login again.",
+        )
+    
     try:
         payload = jwt.decode(
             token,
@@ -65,6 +75,15 @@ def verify_refresh_token(token: str, credentials_exception):
 
 def verify_token(token: str, credentials_exception):
     settings = get_settings()
+    
+    # Check if token is blacklisted
+    if is_blacklisted(token):
+        raise HTTPException(
+            status_code=401,
+            detail="Token has been revoked. Please login again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
     try:
         payload = jwt.decode(
             token,

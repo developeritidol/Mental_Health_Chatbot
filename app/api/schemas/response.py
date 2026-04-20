@@ -120,3 +120,14 @@ class VerifyOtpResponse(BaseModel):
 class ResetPasswordResponse(BaseModel):
     status: str
     message: str
+
+
+class RefreshTokenResponse(BaseModel):
+    status: str
+    access_token: str
+    token_type: str = "bearer"
+
+
+class LogoutResponse(BaseModel):
+    status: str
+    message: str

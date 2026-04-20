@@ -33,7 +33,7 @@ from app.core.logger import get_logger
 from app.core.auth.hashing import Hash
 from app.core.auth.JWTtoken import create_access_token, create_refresh_token
 from app.services.email_service import generate_otp, validate_email, send_otp_email
-# from app.api.schemas.request import UserRole
+
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -108,6 +108,7 @@ def validate_account_status(user_doc: dict) -> None:
 
 @router.post("/register", response_model=UserSignupResponse)
 async def user_register(
+    full_name: str = Query(..., min_length=3, max_length=100, pattern=r"^[a-zA-Z ]+$"),
     username: str = Query(..., min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_]+$"),
     email: str = Query(..., pattern=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"),
     password: str = Query(..., min_length=8, max_length=128),

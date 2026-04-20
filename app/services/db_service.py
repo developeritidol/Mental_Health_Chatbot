@@ -31,13 +31,13 @@ async def generate_embedding(text: str) -> List[float]:
 
 
 async def retrieve_long_term_memory(
-    device_id: str,
+    user_id: str,
     query_vector: List[float],
     exclude_session_id: str = "",
     limit: int = 4,
 ) -> List[str]:
     """
-    Searches ALL past messages belonging to this device_id using a
+    Searches ALL past messages belonging to this user_id using a
     cosine-similarity $vectorSearch on MongoDB Atlas.
     Returns plain-text snippets of the most relevant past turns.
     Returns empty list on failure or if no index exists yet.
@@ -58,7 +58,7 @@ async def retrieve_long_term_memory(
                     "queryVector": query_vector,
                     "numCandidates": 50,
                     "limit": limit + 2,  # fetch extra to allow exclusion filter
-                    "filter": {"device_id": device_id},
+                    "filter": {"user_id": user_id},
                 }
             },
             # Exclude current session to avoid echo chamber
@@ -77,7 +77,7 @@ async def retrieve_long_term_memory(
                 snippets.append(f"{role}: {content}")
 
         if snippets:
-            logger.info(f"Long-term memory: {len(snippets)} relevant past turns retrieved for {device_id}")
+            logger.info(f"Long-term memory: {len(snippets)} relevant past turns retrieved for {user_id}")
         return snippets
 
     except Exception as e:
@@ -108,7 +108,7 @@ def build_personality_summary(answers: dict) -> str:
 
 # ── User profile ──────────────────────────────────────────────────────────────
 
-async def upsert_user_profile(device_id: str, profile: dict, personality_answers: dict) -> bool:
+async def upsert_user_profile(user_id: str, profile: dict, personality_answers: dict) -> bool:
     """Saves or updates a user profile with personality data."""
     db = get_database()
     if db is None:
@@ -135,18 +135,18 @@ async def upsert_user_profile(device_id: str, profile: dict, personality_answers
 
     try:
         await db.users.update_one(
-            {"device_id": device_id},
+            {"user_id": user_id},
             {"$set": update_doc, "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
             upsert=True,
         )
-        logger.info(f"Profile saved for device {device_id}: {personality_summary}")
+        logger.info(f"Profile saved for user {user_id}: {personality_summary}")
         return True
     except Exception as e:
         logger.error(f"Failed to upsert user profile: {e}")
         return False
 
 
-async def get_user_profile(device_id: str) -> Optional[dict]:
+async def get_user_profile(user_id: str) -> Optional[dict]:
     """Loads a user profile from DB. Returns None if not found."""
     db = get_database()
     if db is None:
@@ -154,15 +154,15 @@ async def get_user_profile(device_id: str) -> Optional[dict]:
         return None
 
     try:
-        doc = await db.users.find_one({"device_id": device_id})
+        doc = await db.users.find_one({"user_id": user_id})
         if not doc:
-            logger.warning(f"No profile found for device {device_id}")
+            logger.warning(f"No profile found for user {user_id}")
             return None
 
         # Build the profile dict that the LLM service expects
         ec = doc.get("emergency_contact", {}) or {}
         return {
-            "device_id": device_id,
+            "user_id": user_id,
             "name": f"{doc.get('first_name', 'Friend')} {doc.get('last_name', '')}".strip() or "Friend",
             "gender": doc.get("gender", ""),
             "age": doc.get("age"),
@@ -172,15 +172,15 @@ async def get_user_profile(device_id: str) -> Optional[dict]:
             "crisis_follow_up": False,
         }
     except Exception as e:
-        logger.error(f"Failed to get profile for {device_id}: {e}")
+        logger.error(f"Failed to get profile for {user_id}: {e}")
         return None
 
 
 # ── Session ───────────────────────────────────────────────────────────────────
 
-async def get_existing_session(device_id: str) -> Optional[dict]:
+async def get_existing_session(user_id: str) -> Optional[dict]:
     """
-    Returns the existing session for a device_id, if one exists.
+    Returns the existing session for a user_id, if one exists.
     Enforces the one-device-one-session rule.
     """
     db = get_database()
@@ -188,19 +188,19 @@ async def get_existing_session(device_id: str) -> Optional[dict]:
         return None
     try:
         doc = await db.sessions.find_one(
-            {"device_id": device_id},
+            {"user_id": user_id},
             sort=[("created_at", -1)],  # get the most recent one
         )
         if doc:
             return {
                 "session_id": doc.get("session_id"),
-                "device_id": doc.get("device_id"),
+                "user_id": doc.get("user_id"),
                 "is_active": doc.get("is_active", True),
                 "is_escalated": doc.get("is_escalated", False),
             }
         return None
     except Exception as e:
-        logger.error(f"Failed to lookup session for {device_id}: {e}")
+        logger.error(f"Failed to lookup session for user {user_id}: {e}")
         return None
 
 
@@ -213,7 +213,7 @@ async def create_session(session_data: dict) -> bool:
     try:
         doc = {
             "session_id": session_data["session_id"],
-            "device_id": session_data["device_id"],
+            "user_id": session_data["user_id"],
             "is_active": True,
             "lethality_alert": False,
             "is_escalated": False,          # True once handed off to a human
@@ -251,9 +251,9 @@ async def escalate_session(session_id: str) -> bool:
         return False
 
 
-async def escalate_device(device_id: str) -> bool:
+async def escalate_user(user_id: str) -> bool:
     """
-    Marks all sessions for a device as escalated to a human operator.
+    Marks all sessions for a user as escalated to a human operator.
     Called immediately when safety.py detects is_crisis == True.
     """
     db = get_database()
@@ -261,17 +261,17 @@ async def escalate_device(device_id: str) -> bool:
         return False
     try:
         await db.sessions.update_many(
-            {"device_id": device_id},
+            {"user_id": user_id},
             {"$set": {
                 "is_escalated": True,
                 "escalated_at": datetime.now(timezone.utc),
                 "updated_at": datetime.now(timezone.utc),
             }},
         )
-        logger.warning(f"[ESCALATION] Device {device_id} handed off to human operator.")
+        logger.warning(f"[ESCALATION] User {user_id} handed off to human operator.")
         return True
     except Exception as e:
-        logger.error(f"Failed to escalate device {device_id}: {e}")
+        logger.error(f"Failed to escalate user {user_id}: {e}")
         return False
 
 
@@ -300,26 +300,26 @@ async def close_escalation(session_id: str) -> bool:
         return False
 
 
-async def close_escalation_by_device(device_id: str) -> bool:
+async def close_escalation_by_user(user_id: str) -> bool:
     """
-    Marks all sessions for a device as no longer escalated.
+    Marks all sessions for a user as no longer escalated.
     """
     db = get_database()
     if db is None:
         return False
     try:
         await db.sessions.update_many(
-            {"device_id": device_id, "is_escalated": True},
+            {"user_id": user_id, "is_escalated": True},
             {"$set": {
                 "is_escalated": False,
                 "escalation_closed_at": datetime.now(timezone.utc),
                 "updated_at": datetime.now(timezone.utc),
             }},
         )
-        logger.info(f"[ESCALATION CLOSED] All sessions for device {device_id} returned to AI mode.")
+        logger.info(f"[ESCALATION CLOSED] All sessions for user {user_id} returned to AI mode.")
         return True
     except Exception as e:
-        logger.error(f"Failed to close escalation for device {device_id}: {e}")
+        logger.error(f"Failed to close escalation for user {user_id}: {e}")
         return False
 
 
@@ -337,25 +337,25 @@ async def is_session_escalated(session_id: str) -> bool:
             return True
         return False
     except Exception as e:
-        logger.error(f"Failed to check escalation status for {session_id}: {e}")
+        logger.error(f"Failed to check escalation status for session {session_id}: {e}")
         return False
 
 
-async def is_device_escalated(device_id: str) -> bool:
+async def is_user_escalated(user_id: str) -> bool:
     """
-    Checks whether ANY session for this device is currently under human control.
+    Checks whether ANY session for this user is currently under human control.
     Used by chat.py to block AI responses during active human intervention.
     """
     db = get_database()
     if db is None:
         return False
     try:
-        doc = await db.sessions.find_one({"device_id": device_id, "is_escalated": True})
+        doc = await db.sessions.find_one({"user_id": user_id, "is_escalated": True})
         if doc:
             return True
         return False
     except Exception as e:
-        logger.error(f"Failed to check escalation status for device {device_id}: {e}")
+        logger.error(f"Failed to check escalation status for user {user_id}: {e}")
         return False
 
 
@@ -373,7 +373,7 @@ async def save_message(message_data: dict) -> bool:
 
     doc = {
         "session_id": message_data.get("session_id"),
-        "device_id": message_data.get("device_id"),  # Required for vector search filtering
+        "user_id": message_data.get("user_id"),  # Completely replacing user_id reliance
         "turn_number": message_data.get("turn_number", 0),
         "role": message_data.get("role"),
         "content": message_data.get("content"),
@@ -411,7 +411,7 @@ async def get_formatted_history(session_id: str, limit: int = 100) -> List[Dict[
     """
     db = get_database()
     if db is None:
-        logger.warning(f"DB not connected, returning empty history for {session_id}")
+        logger.warning(f"DB not connected, returning empty history for session {session_id}")
         return []
 
     try:
@@ -421,7 +421,7 @@ async def get_formatted_history(session_id: str, limit: int = 100) -> List[Dict[
 
         return [{"role": doc["role"], "content": doc["content"]} for doc in docs]
     except Exception as e:
-        logger.error(f"Failed to fetch history for {session_id}: {e}")
+        logger.error(f"Failed to fetch history for session {session_id}: {e}")
         return []
 
 
@@ -456,66 +456,66 @@ async def get_session_messages(session_id: str) -> List[Dict]:
         return []
 
 
-async def get_device_messages(device_id: str) -> List[Dict]:
+async def get_user_messages(user_id: str) -> List[Dict]:
     """
-    Retrieves ALL messages for a given device_id.
+    Retrieves ALL messages for a given user_id.
     Returns them sorted chronologically (oldest to newest) to rebuild the UI.
     """
     db = get_database()
     if db is None:
-        logger.warning(f"DB not connected, returning empty history for device {device_id}")
+        logger.warning(f"DB not connected, returning empty history for user {user_id}")
         return []
 
     try:
-        cursor = db.messages.find({"device_id": device_id}).sort("timestamp", 1)
+        cursor = db.messages.find({"user_id": user_id}).sort("timestamp", 1)
         docs = await cursor.to_list(length=None)
 
         formatted = []
         for doc in docs:
             if doc.get("content"):
                 formatted.append({
-                    "device_id": doc.get("device_id", "unknown"),
+                    "user_id": doc.get("user_id", "unknown"),
                     "role": doc.get("role", "unknown"),
                     "content": doc.get("content", ""),
                     "timestamp": doc.get("timestamp").replace(tzinfo=timezone.utc) if doc.get("timestamp") else None,
                 })
 
-        logger.info(f"Fetched {len(formatted)} messages for device {device_id}")
+        logger.info(f"Fetched {len(formatted)} messages for user {user_id}")
         return formatted
     except Exception as e:
-        logger.error(f"Failed to fetch messages for device {device_id}: {e}")
+        logger.error(f"Failed to fetch messages for user {user_id}: {e}")
         return []
 
 
-async def get_all_sessions(device_id: str) -> List[Dict]:
+async def get_all_sessions(user_id: str) -> List[Dict]:
     """
-    Retrieves ALL sessions for a given device_id.
+    Retrieves ALL sessions for a given user_id.
     Returns them sorted by creation time (newest first).
     """
     db = get_database()
     if db is None:
-        logger.warning(f"DB not connected, returning empty sessions for {device_id}")
+        logger.warning(f"DB not connected, returning empty sessions for user {user_id}")
         return []
 
     try:
-        cursor = db.sessions.find({"device_id": device_id}).sort("created_at", -1)
+        cursor = db.sessions.find({"user_id": user_id}).sort("created_at", -1)
         docs = await cursor.to_list(length=None)
 
         sessions = []
         for doc in docs:
             sessions.append({
                 "session_id": doc.get("session_id"),
-                "device_id": doc.get("device_id"),
+                "user_id": doc.get("user_id"),
                 "is_active": doc.get("is_active", False),
                 "is_escalated": doc.get("is_escalated", False),
                 "created_at": doc.get("created_at").replace(tzinfo=timezone.utc) if doc.get("created_at") else None,
                 "updated_at": doc.get("updated_at").replace(tzinfo=timezone.utc) if doc.get("updated_at") else None,
             })
 
-        logger.info(f"Fetched {len(sessions)} sessions for device {device_id}")
+        logger.info(f"Fetched {len(sessions)} sessions for user {user_id}")
         return sessions
     except Exception as e:
-        logger.error(f"Failed to fetch sessions for {device_id}: {e}")
+        logger.error(f"Failed to fetch sessions for user {user_id}: {e}")
         return []
 
 
@@ -535,7 +535,7 @@ async def get_escalated_sessions() -> List[Dict]:
             {"$sort": {"escalated_at": -1}},
             {
                 "$group": {
-                    "_id": "$device_id",
+                    "_id": "$user_id",
                     "doc": {"$first": "$$ROOT"}
                 }
             },
@@ -544,8 +544,8 @@ async def get_escalated_sessions() -> List[Dict]:
             {
                 "$lookup": {
                     "from": "users",
-                    "localField": "device_id",
-                    "foreignField": "device_id",
+                    "localField": "user_id",
+                    "foreignField": "user_id",
                     "as": "user_info"
                 }
             },
@@ -588,7 +588,7 @@ async def get_escalated_sessions() -> List[Dict]:
         for doc in docs:
             sessions.append({
                 "session_id": doc.get("session_id"),
-                "device_id": doc.get("device_id"),
+                "user_id": doc.get("user_id"),
                 "first_name": doc.get("first_name", "Unknown"),
                 "last_name": doc.get("last_name"),
                 "username": doc.get("username"),
@@ -607,7 +607,7 @@ async def get_escalated_sessions() -> List[Dict]:
 async def get_expired_escalated_sessions(timeout_minutes: int) -> List[Dict[str, str]]:
     """
     Finds escalated sessions that haven't been updated in `timeout_minutes` minutes.
-    Returns a list of dicts containing `session_id` and `device_id`.
+    Returns a list of dicts containing `session_id` and `user_id`.
     """
     db = get_database()
     if db is None:
@@ -622,7 +622,7 @@ async def get_expired_escalated_sessions(timeout_minutes: int) -> List[Dict[str,
             "updated_at": {"$lte": expiration_time}
         })
         docs = await cursor.to_list(length=None)
-        return [{"session_id": doc["session_id"], "device_id": doc.get("device_id", doc["session_id"])} for doc in docs]
+        return [{"session_id": doc["session_id"], "user_id": doc.get("user_id", doc["session_id"])} for doc in docs]
     except Exception as e:
         logger.error(f"Failed to fetch expired escalated sessions: {e}")
         return []

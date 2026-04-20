@@ -52,7 +52,6 @@ class PersonalityAnswers(BaseModel):
 
 class AssessmentRequest(BaseModel):
     """POST /api/assessment — one-time onboarding from Android."""
-    device_id: str = Field(..., min_length=1)
     profile: ProfileInput
     personality_answers: PersonalityAnswers
 
@@ -67,7 +66,7 @@ class LoginRequest(BaseModel):
 
 class StreamChatRequest(BaseModel):
     """POST /api/chat/stream — every chat message from Android."""
-    device_id: str = Field(..., min_length=1)
+    user_id: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1, max_length=2000)
 
 

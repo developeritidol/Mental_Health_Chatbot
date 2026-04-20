@@ -1,120 +1,167 @@
 """
 User Routes
-────────────
+-----------
 POST /api/users/register
 POST /api/users/login
+POST /api/users/forgot-password
+POST /api/users/verify-otp
+POST /api/users/reset-password
+POST /api/users/logout
 """
 
-from typing import Optional
-from fastapi import APIRouter, HTTPException, Query, Depends
-from fastapi.security import OAuth2PasswordRequestForm
-from datetime import datetime,timedelta
+import re
+from typing import Literal
+from fastapi import APIRouter, HTTPException, Depends
+from datetime import datetime, timedelta
 from app.core.auth.oauth2 import get_current_user
+from app.core.auth.oauth2 import get_token
 
 from app.api.schemas.request import (
-    ProfessionalRole,
-    PracticeType,
-    ConsultationMode,
+    UserRole,
+    VerifyOtpRequest,
+    ResetPasswordRequest,
+    UserCreateRequest,
+    UserLoginRequest,
+    ForgotPasswordRequest,
+    RefreshTokenRequest,
 )
-from app.api.schemas.response import UserSignupResponse, UserLoginResponse, ForgotPasswordResponse, VerifyOtpResponse, ResetPasswordResponse
+from app.api.schemas.response import (
+    UserSignupResponse,
+    UserLoginResponse,
+    ForgotPasswordResponse,
+    VerifyOtpResponse,
+    RefreshTokenResponse,
+    LogoutResponse,
+    ResetPasswordResponse,
+)
 from app.models.db import UserModelDB
 from app.core.database import get_database
 from app.core.logger import get_logger
 from app.core.auth.hashing import Hash
-from app.core.auth.JWTtoken import create_access_token, create_refresh_token
+from app.core.auth.JWTtoken import create_access_token, create_refresh_token, verify_refresh_token
+from app.core.auth.token_blacklist import add_to_blacklist
 from app.services.email_service import generate_otp, validate_email, send_otp_email
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/users", tags=["users"])
 
 
-@router.post("/register", response_model=UserSignupResponse)
-async def user_register(
-    full_name: str = Query(..., min_length=1, max_length=100),
-    email: str = Query(..., pattern=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"),
-    password: str = Query(..., min_length=8, max_length=128),
-    phone_number: str = Query(..., pattern=r"^\+?[1-9]\d{1,14}$"),
-    role: str = Query("user", min_length=1, max_length=50),
-    professional_role: Optional[ProfessionalRole] = Query(None),
-    license_number: Optional[str] = Query(None, min_length=1, max_length=50),
-    state_of_licensure: Optional[str] = Query(None, min_length=1, max_length=50),
-    npi_number: Optional[str] = Query(None, min_length=10, max_length=10),
-    practice_type: Optional[PracticeType] = Query(None),
-    city: Optional[str] = Query(None, min_length=1, max_length=50),
-    state: Optional[str] = Query(None, min_length=1, max_length=50),
-    consultation_mode: Optional[ConsultationMode] = Query(None),
-):
-    """Register a normal user or admin using Query Parameters."""
+# ── Helper Functions ───────────────────────────────────────────────────────────
+
+def detect_identifier_type(identifier: str) -> Literal["email", "phone", "username"]:
+    email_pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+    if re.match(email_pattern, identifier):
+        return "email"
+
+    phone_pattern = r"^\+?[1-9]\d{1,14}$"
+    if re.match(phone_pattern, identifier):
+        return "phone"
+
+    username_pattern = r"^[a-zA-Z0-9_]{3,30}$"
+    if re.match(username_pattern, identifier):
+        return "username"
+
+    raise ValueError(f"Invalid identifier format: {identifier}")
+
+
+async def find_user_by_identifier(db, identifier: str):
     try:
+        identifier_type = detect_identifier_type(identifier)
+    except ValueError:
+        return None
+
+    query_map = {
+        "email":    {"email": identifier},
+        "phone":    {"phone_number": identifier},
+        "username": {"username": identifier},
+    }
+    return await db.users.find_one(query_map[identifier_type])
+
+
+def validate_user_role(role: str) -> str:
+    if not role:
+        raise HTTPException(status_code=400, detail="Role is required")
+    normalized = role.strip().lower()
+    if normalized not in {"user", "admin"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid role '{role}'. Allowed: admin, user",
+        )
+    return normalized
+
+
+def validate_account_status(user_doc: dict) -> None:
+    if not user_doc.get("is_active", True):
+        raise HTTPException(
+            status_code=403,
+            detail="Account is disabled. Please contact support for assistance.",
+        )
+
+
+# ── Routes ─────────────────────────────────────────────────────────────────────
+
+@router.post("/register", response_model=UserSignupResponse)
+async def user_register(payload: UserCreateRequest):
+    """Register a new user via JSON body."""
+    try:
+        logger.info(f" Registration attempt | Email: {payload.email} | Username: {payload.username}")
+
         db = get_database()
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed. Please check MongoDB connection.")
 
-        existing = await db.users.find_one({"$or": [{"email": email}, {"phone_number": phone_number}]})
+        # Input normalisation
+        full_name    = payload.full_name.strip()
+        username     = payload.username.strip().lower()
+        email        = payload.email.strip().lower()
+        phone_number = payload.phone_number.strip()
+
+        # Duplicate check
+        existing = await db.users.find_one({
+            "$or": [
+                {"email": email},
+                {"phone_number": phone_number},
+                {"username": username},
+            ]
+        })
         if existing:
-            raise HTTPException(status_code=400, detail="Email or phone number already registered")
+            if existing.get("email") == email:
+                raise HTTPException(status_code=400, detail="Email already registered")
+            elif existing.get("phone_number") == phone_number:
+                raise HTTPException(status_code=400, detail="Phone number already registered")
+            elif existing.get("username") == username:
+                raise HTTPException(status_code=400, detail="Username already taken")
 
-        password_hash = Hash.bcrypt(password)
-        role_value = role.strip().lower()
+        # Resolve enum values
+        role_value                = payload.role.value if isinstance(payload.role, UserRole) else payload.role
+        professional_role_value   = payload.professional_role.value if payload.professional_role else None
+        practice_type_value       = payload.practice_type.value if payload.practice_type else None
+        consultation_mode_value   = payload.consultation_mode.value if payload.consultation_mode else None
 
-        if role_value == "admin":
-            missing_fields = []
-            if professional_role is None:
-                missing_fields.append("professional_role")
-            if license_number is None:
-                missing_fields.append("license_number")
-            if state_of_licensure is None:
-                missing_fields.append("state_of_licensure")
-            if npi_number is None:
-                missing_fields.append("npi_number")
-            if practice_type is None:
-                missing_fields.append("practice_type")
-            if city is None:
-                missing_fields.append("city")
-            if state is None:
-                missing_fields.append("state")
-            if consultation_mode is None:
-                missing_fields.append("consultation_mode")
-
-            if missing_fields:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Missing admin fields for role 'admin': {', '.join(missing_fields)}"
-                )
-
-            professional_role_value = professional_role.value
-            practice_type_value = practice_type.value
-            consultation_mode_value = consultation_mode.value
-        else:
-            professional_role_value = None
-            license_number = None
-            state_of_licensure = None
-            npi_number = None
-            practice_type_value = None
-            city = None
-            state = None
-            consultation_mode_value = None
+        # Hash password and persist
+        password_hash = Hash.bcrypt(payload.password)
 
         user = UserModelDB(
             full_name=full_name,
+            username=username,
             email=email,
             password_hash=password_hash,
             phone_number=phone_number,
             professional_role=professional_role_value,
-            license_number=license_number,
-            state_of_licensure=state_of_licensure,
-            npi_number=npi_number,
+            license_number=payload.license_number,
+            state_of_licensure=payload.state_of_licensure,
+            npi_number=payload.npi_number,
             practice_type=practice_type_value,
-            city=city,
-            state=state,
+            city=payload.city,
+            state=payload.state,
             consultation_mode=consultation_mode_value,
             role=role_value,
         )
 
-        result = await db.users.insert_one(user.dict(by_alias=True, exclude_none=True))
+        result  = await db.users.insert_one(user.dict(by_alias=True, exclude_none=True))
         user_id = str(result.inserted_id)
 
-        logger.info(f"✅ User Registered Successfully: {email} | Role: {role_value} | ID: {user_id}")
+        logger.info(f" User Registered: {email} | Role: {role_value} | ID: {user_id}")
 
         return UserSignupResponse(
             status="success",
@@ -125,42 +172,65 @@ async def user_register(
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
-        logger.error(f"❌ Register Error: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Registration failed: {str(e)}"
-        )
-
+        logger.error(f" Register Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
 @router.post("/login", response_model=UserLoginResponse)
-async def user_login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-):
-    """Login for admin or normal user."""
+async def user_login(payload: UserLoginRequest):
+    """Login using username, email, or phone number via JSON body."""
     try:
+        logger.info(f" Login attempt | Identifier: {payload.username}")
+
         db = get_database()
         if db is None:
-            raise HTTPException(status_code=503, detail="Database connection failed.")
+            raise HTTPException(status_code=503, detail="Database connection failed. Please try again later.")
 
-        identifier = form_data.username
-        password = form_data.password
+        login_identifier = payload.username
+        password = payload.password
 
-        user_doc = await db.users.find_one({"$or": [{"email": identifier}, {"phone_number": identifier}]})
-        if not user_doc or not user_doc.get("password_hash"):
+        if not password:
+            raise HTTPException(status_code=400, detail="Password is required")
+
+        user_doc = await find_user_by_identifier(db, login_identifier)
+        if not user_doc:
+            logger.warning(f"Login attempt with non-existent identifier: {login_identifier}")
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
-        if not Hash.verify(user_doc['password_hash'], password):
+        if not user_doc.get("password_hash"):
+            logger.error(f"User {login_identifier} has no password hash stored")
+            raise HTTPException(status_code=500, detail="Account configuration error. Please contact support.")
+
+        if not Hash.verify(user_doc["password_hash"], password):
+            logger.warning(f"Invalid password attempt for: {login_identifier}")
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
-        await db.users.update_one({"_id": user_doc["_id"]}, {"$set": {"last_login": datetime.utcnow()}})
+        user_role = user_doc.get("role", "user")
+        try:
+            validate_user_role(user_role)
+        except HTTPException:
+            logger.error(f"User {login_identifier} has invalid role: {user_role}")
+            raise HTTPException(status_code=403, detail="Account configuration error. Please contact support.")
 
-        user_data = {k: v for k, v in user_doc.items() if k not in ['password_hash', '_id']}
-        user_data['user_id'] = str(user_doc['_id'])
+        validate_account_status(user_doc)
 
-        access_token = create_access_token(data={"sub": user_doc["email"]})
-        refresh_token = create_refresh_token(data={"sub": user_doc["email"]})
+        await db.users.update_one(
+            {"_id": user_doc["_id"]},
+            {"$set": {"last_login": datetime.utcnow()}},
+        )
 
-        logger.info(f"User logged in: {identifier}")
+        user_data = {k: v for k, v in user_doc.items() if k not in ["password_hash", "_id"]}
+        user_data["user_id"] = str(user_doc["_id"])
+
+        token_subject = user_doc.get("email") or user_doc.get("username") or str(user_doc["_id"])
+        access_token = create_access_token(data={"sub": token_subject, "role": user_role})
+        refresh_token = create_refresh_token(data={"sub": token_subject})
+
+        identifier_type = detect_identifier_type(login_identifier)
+        logger.info(
+            f" Login Successful | Type: {identifier_type} | ID: {login_identifier} "
+            f"| Role: {user_role} | UID: {user_data['user_id']}"
+        )
+
         return UserLoginResponse(
             status="success",
             message="Login successful",
@@ -169,57 +239,41 @@ async def user_login(
             refresh_token=refresh_token,
         )
 
-    except HTTPException as e:
-        raise e
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Login Error: {e}")
+        logger.error(f" Login Error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
 
-
 @router.post("/forgot-password", response_model=ForgotPasswordResponse)
-async def forgot_password(
-    email: str = Query(..., description="User email address"),
-    user = Depends(get_current_user)
-):
+async def forgot_password(payload: ForgotPasswordRequest):
     """Initiate password reset by sending OTP to email."""
     try:
+        logger.info(f" Forgot password request | Email: {payload.email}")
+
         db = get_database()
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed.")
 
-        # Find user by email
-        user_doc = await db.users.find_one({"email": email})
+        user_doc = await db.users.find_one({"email": payload.email})
         if not user_doc:
-            logger.warning(f"Password reset attempt for non-existent email: {email}")
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Validate email is deliverable
-        if not validate_email(email):
-            logger.warning(f"Invalid email address: {email}")
+        if not validate_email(payload.email):
             raise HTTPException(status_code=400, detail="Invalid email address")
 
-        # Generate OTP
-        otp = generate_otp()
+        otp        = generate_otp()
         expires_at = datetime.utcnow() + timedelta(minutes=30)
 
-        # Save OTP and expiry to database
         await db.users.update_one(
             {"_id": user_doc["_id"]},
-            {
-                "$set": {
-                    "password_reset_token": otp,
-                    "password_reset_expires": expires_at,
-                }
-            },
+            {"$set": {"password_reset_token": otp, "password_reset_expires": expires_at}},
         )
 
-        # Send OTP via email
-        email_sent = await send_otp_email(email, otp)
-        if not email_sent:
-            logger.error(f"Failed to send OTP email to {email}")
+        if not await send_otp_email(payload.email, otp):
             raise HTTPException(status_code=500, detail="Failed to send OTP email")
 
-        logger.info(f"Password reset OTP sent to {email}")
+        logger.info(f" Password reset OTP sent to {payload.email}")
         return ForgotPasswordResponse(
             status="success",
             message="OTP sent to your email. Please check your inbox.",
@@ -228,53 +282,51 @@ async def forgot_password(
     except HTTPException as e:
         raise e
     except Exception as e:
-        logger.error(f"Forgot password error: {e}")
+        logger.error(f" Forgot password error: {e}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
 @router.post("/verify-otp", response_model=VerifyOtpResponse)
-async def verify_otp(
-    email: str = Query(..., description="User email address"),
-    otp: str = Query(..., min_length=6, max_length=6, description="6-digit OTP"),
-    user = Depends(get_current_user)
-):
+async def verify_otp(payload: VerifyOtpRequest):
     """Verify OTP for password reset."""
     try:
         db = get_database()
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed.")
 
-        # Find user by email
-        user_doc = await db.users.find_one({"email": email})
+        user_doc = await db.users.find_one({"email": payload.email})
         if not user_doc:
-            logger.warning(f"OTP verification attempt for non-existent email: {email}")
+            logger.warning(f"OTP verification attempt for non-existent email: {payload.email}")
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Check if OTP exists
-        if not user_doc.get("password_reset_token"):
-            logger.warning(f"No OTP found for {email}")
-            raise HTTPException(status_code=400, detail="No password reset request found")
+        if not user_doc.get("password_reset_token") or not user_doc.get("password_reset_expires"):
+            logger.warning(f"No active password reset request found for {payload.email}")
+            raise HTTPException(status_code=400, detail="No active password reset request found.")
 
-        # Check if OTP matches
-        if user_doc["password_reset_token"] != otp:
-            logger.warning(f"Invalid OTP attempt for {email}")
-            raise HTTPException(status_code=401, detail="Invalid OTP")
-
-        # Check if OTP has expired
         expires_at = user_doc.get("password_reset_expires")
         if expires_at and datetime.utcnow() > expires_at:
-            logger.warning(f"Expired OTP attempt for {email}")
+            logger.warning(f"Expired OTP attempt for {payload.email}")
             await db.users.update_one(
                 {"_id": user_doc["_id"]},
                 {"$set": {"password_reset_token": None, "password_reset_expires": None}},
             )
-            raise HTTPException(status_code=408, detail="OTP has expired")
+            raise HTTPException(status_code=408, detail="OTP has expired. Please request a new one.")
 
-        logger.info(f"OTP verified successfully for {email}")
-        return VerifyOtpResponse(
-            status="success",
-            message="OTP verified successfully. You can now reset your password.",
+        if user_doc["password_reset_token"] != payload.otp:
+            logger.warning(f"Invalid OTP attempt for {payload.email}")
+            raise HTTPException(status_code=401, detail="Invalid OTP.")
+
+        await db.users.update_one(
+            {"_id": user_doc["_id"]},
+            {"$set": {
+                "is_otp_verified":        True,
+                "password_reset_token":   None,
+                "password_reset_expires": None,
+            }},
         )
+
+        logger.info(f"OTP verified successfully for {payload.email}")
+        return VerifyOtpResponse(status="success", message="OTP verified successfully")
 
     except HTTPException as e:
         raise e
@@ -284,56 +336,34 @@ async def verify_otp(
 
 
 @router.post("/reset-password", response_model=ResetPasswordResponse)
-async def reset_password(
-    email: str = Query(..., description="User email address"),
-    otp: str = Query(..., min_length=6, max_length=6, description="6-digit OTP"),
-    new_password: str = Query(..., min_length=8, max_length=128, description="New password"),
-    user = Depends(get_current_user)
-):
-    """Reset password using OTP."""
+async def reset_password(payload: ResetPasswordRequest):
+    """Reset password using verified OTP status."""
     try:
         db = get_database()
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed.")
 
-        # Find user by email
-        user_doc = await db.users.find_one({"email": email})
+        user_doc = await db.users.find_one({"email": payload.email})
         if not user_doc:
-            logger.warning(f"Password reset attempt for non-existent email: {email}")
+            logger.warning(f"Password reset attempt for non-existent email: {payload.email}")
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Check if OTP matches
-        if user_doc.get("password_reset_token") != otp:
-            logger.warning(f"Invalid OTP in reset for {email}")
-            raise HTTPException(status_code=401, detail="Invalid OTP")
+        if user_doc.get("is_otp_verified") is not True:
+            logger.warning(f"Unauthorized reset attempt (OTP not verified) for {payload.email}")
+            raise HTTPException(status_code=403, detail="Access denied. Please verify your OTP first.")
 
-        # Check if OTP has expired
-        expires_at = user_doc.get("password_reset_expires")
-        if expires_at and datetime.utcnow() > expires_at:
-            logger.warning(f"Expired OTP in reset for {email}")
-            await db.users.update_one(
-                {"_id": user_doc["_id"]},
-                {"$set": {"password_reset_token": None, "password_reset_expires": None}},
-            )
-            raise HTTPException(status_code=408, detail="OTP has expired")
+        new_password_hash = Hash.bcrypt(payload.new_password)
 
-        # Hash new password
-        new_password_hash = Hash.bcrypt(new_password)
-
-        # Update password and clear OTP
         await db.users.update_one(
             {"_id": user_doc["_id"]},
-            {
-                "$set": {
-                    "password_hash": new_password_hash,
-                    "password_reset_token": None,
-                    "password_reset_expires": None,
-                    "last_login": datetime.utcnow(),
-                }
-            },
+            {"$set": {
+                "password_hash":  new_password_hash,
+                "last_login":     datetime.utcnow(),
+                "is_otp_verified": False,
+            }},
         )
 
-        logger.info(f"Password reset successfully for {email}")
+        logger.info(f"Password reset successfully for {payload.email}")
         return ResetPasswordResponse(
             status="success",
             message="Password reset successfully. You can now login with your new password.",
@@ -344,3 +374,64 @@ async def reset_password(
     except Exception as e:
         logger.error(f"Password reset error: {e}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@router.post("/refresh", response_model=RefreshTokenResponse)
+async def refresh_token(payload: RefreshTokenRequest):
+    """Refresh access token using a valid refresh token."""
+    try:
+        logger.info(" Refresh token attempt")
+
+        credentials_exception = HTTPException(
+            status_code=401,
+            detail="Invalid refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+        token_data = verify_refresh_token(payload.refresh_token, credentials_exception)
+
+        # Get user from database to fetch role
+        db = get_database()
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database connection failed")
+
+        user_doc = await db.users.find_one({"email": token_data.useremail})
+        if not user_doc:
+            raise HTTPException(status_code=401, detail="User not found")
+
+        user_role = user_doc.get("role", "user")
+        token_subject = user_doc.get("email") or user_doc.get("username")
+
+        # Generate new access token
+        access_token = create_access_token(data={"sub": token_subject, "role": user_role})
+
+        logger.info(f" Access token refreshed for: {token_data.useremail}")
+
+        return RefreshTokenResponse(
+            status="success",
+            access_token=access_token,
+            token_type="bearer"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f" Refresh token error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Token refresh failed: {str(e)}")
+
+
+@router.post("/logout", response_model=LogoutResponse)
+async def user_logout(
+    token: str = Depends(get_token),
+    user = Depends(get_current_user)
+):
+    try:
+        add_to_blacklist(token)
+
+        return LogoutResponse(
+            status="success",
+            message="Logout successful"
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

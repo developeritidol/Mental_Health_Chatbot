@@ -1,19 +1,23 @@
-"""
-Chat Route
-──────────
-POST /api/chat/stream — SSE streaming chat.
-Android sends only: session_id, device_id, message.
-Server loads profile and full history from MongoDB.
-"""
-
 import json
 from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
+# Schemas
 from app.api.schemas.request import StreamChatRequest
-from app.api.schemas.response import ChatHistoryResponse, ChatMessageResponse, SessionListResponse, SessionResponse
+from app.api.schemas.response import (
+    ChatHistoryResponse,
+    ChatMessageResponse,
+    SessionListResponse,
+    SessionResponse,
+)
+
+# Core
 from app.core.auth.oauth2 import get_current_user
+from app.core.logger import get_logger
+
+# Services
 from app.services import emotion as emotion_svc
 from app.services import llm as llm_svc
 from app.services.safety import synthesize_consensus
@@ -29,7 +33,6 @@ from app.services.db_service import (
     is_device_escalated,
     get_existing_session,
 )
-from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["chat"])

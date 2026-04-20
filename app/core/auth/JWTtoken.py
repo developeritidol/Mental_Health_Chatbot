@@ -1,11 +1,8 @@
 import os
 from datetime import datetime, timedelta
-
 from jose import JWTError, jwt, ExpiredSignatureError
-# from app.core.auth.token_blacklist import is_blacklisted
 from app.api.schemas.response import TokenData
 from app.core.config import get_settings
-# from app.core.auth.token_blacklist import is_token_blacklisted
 from app.core.auth.token_blacklist import is_blacklisted
 from fastapi import HTTPException
 

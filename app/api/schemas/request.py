@@ -85,4 +85,4 @@ class ResetPasswordRequest(BaseModel):
 
 class RefreshTokenRequest(BaseModel):
     """POST /api/users/refresh - Exchange a refresh token for a new access token."""
-    refresh_token: str = Field(..., min_length=1, description="A valid refresh token")
+    refresh_token: str = Field(..., min_length=1, description="A valid refresh token")

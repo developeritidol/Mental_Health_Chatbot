@@ -1,4 +1,3 @@
-# app/api/routes/user.py
 """
 User Routes
 -----------
@@ -175,78 +174,6 @@ async def user_register(payload: UserCreateRequest):
     except Exception as e:
         logger.error(f" Register Error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
-
-
-# @router.post("/login", response_model=UserLoginResponse)
-# async def user_login(payload: UserLoginRequest):
-#     """Login using username, email, or phone number via JSON body."""
-#     try:
-#         logger.info(f" Login attempt | Identifier: {payload.username}")
-
-#         db = get_database()
-#         if db is None:
-#             raise HTTPException(status_code=503, detail="Database connection failed. Please try again later.")
-
-#         login_identifier = payload.username
-#         password         = payload.password
-
-#         if not password:
-#             raise HTTPException(status_code=400, detail="Password is required")
-
-#         user_doc = await find_user_by_identifier(db, login_identifier)
-#         if not user_doc:
-#             logger.warning(f"Login attempt with non-existent identifier: {login_identifier}")
-#             raise HTTPException(status_code=401, detail="Invalid credentials")
-
-#         if not user_doc.get("password_hash"):
-#             logger.error(f"User {login_identifier} has no password hash stored")
-#             raise HTTPException(status_code=500, detail="Account configuration error. Please contact support.")
-
-#         if not Hash.verify(user_doc["password_hash"], password):
-#             logger.warning(f"Invalid password attempt for: {login_identifier}")
-#             raise HTTPException(status_code=401, detail="Invalid credentials")
-
-#         user_role = user_doc.get("role", "user")
-#         try:
-#             validate_user_role(user_role)
-#         except HTTPException:
-#             logger.error(f"User {login_identifier} has invalid role: {user_role}")
-#             raise HTTPException(status_code=403, detail="Account configuration error. Please contact support.")
-
-#         validate_account_status(user_doc)
-
-#         await db.users.update_one(
-#             {"_id": user_doc["_id"]},
-#             {"$set": {"last_login": datetime.utcnow()}},
-#         )
-
-#         user_data = {k: v for k, v in user_doc.items() if k not in ["password_hash", "_id"]}
-#         user_data["user_id"] = str(user_doc["_id"])
-
-#         token_subject = user_doc.get("email") or user_doc.get("username") or str(user_doc["_id"])
-#         access_token  = create_access_token(data={"sub": token_subject, "role": user_role})
-#         refresh_token = create_refresh_token(data={"sub": token_subject})
-
-#         identifier_type = detect_identifier_type(login_identifier)
-#         logger.info(
-#             f" Login Successful | Type: {identifier_type} | ID: {login_identifier} "
-#             f"| Role: {user_role} | UID: {user_data['user_id']}"
-#         )
-
-#         return UserLoginResponse(
-#             status="success",
-#             message="Login successful",
-#             user=user_data,
-#             access_token=access_token,
-#             refresh_token=refresh_token,
-#         )
-
-#     except HTTPException:
-#         raise
-#     except Exception as e:
-#         logger.error(f" Login Error: {str(e)}", exc_info=True)
-#         raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
-
 
 @router.post("/login", response_model=UserLoginResponse)
 async def user_login(payload: UserLoginRequest):

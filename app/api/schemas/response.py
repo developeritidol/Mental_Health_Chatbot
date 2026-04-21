@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 
@@ -89,7 +89,51 @@ class TranscriptionResponse(BaseModel):
 # ── Admin / User API responses ─────────────────────────────────────────────────
 
 class TokenData(BaseModel):
-    useremail: str
+    sub: str
+    role: Optional[str] = None
+
+
+class UserProfileData(BaseModel):
+    """User profile data with consistent field order"""
+    full_name: str
+    username: str
+    email: str
+    phone_number: str
+    role: str
+    professional_role: Optional[str] = None
+    license_number: Optional[str] = None
+    state_of_licensure: Optional[str] = None
+    npi_number: Optional[str] = None
+    practice_type: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    consultation_mode: Optional[str] = None
+    user_id: str
+    is_active: bool = True
+    last_login: Optional[datetime] = None
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "full_name": "John Doe",
+                "username": "John_Doe13",
+                "email": "abcd@gmail.com",
+                "phone_number": "+91 1234567890",
+                "role": "user",
+                "professional_role": None,
+                "license_number": None,
+                "state_of_licensure": None,
+                "npi_number": None,
+                "practice_type": None,
+                "city": None,
+                "state": None,
+                "consultation_mode": None,
+                "user_id": "user_12345",
+                "is_active": True,
+                "last_login": None
+            }
+        }
+    }
 
 
 class UserSignupResponse(BaseModel):
@@ -101,7 +145,7 @@ class UserSignupResponse(BaseModel):
 class UserLoginResponse(BaseModel):
     status: str
     message: str
-    user: dict  # simplified user data without password
+    user: UserProfileData
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
@@ -131,3 +175,8 @@ class RefreshTokenResponse(BaseModel):
 class LogoutResponse(BaseModel):
     status: str
     message: str
+
+
+class UserProfileResponse(BaseModel):
+    status: str
+    user: UserProfileData

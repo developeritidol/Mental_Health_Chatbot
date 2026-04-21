@@ -20,7 +20,19 @@ async def connect_to_mongo():
     
     # Ensure Indexes for performance
     try:
-        await db_manager.db.users.create_index("device_id", unique=True)
+        # Remove any null device_id values so sparse unique index works correctly.
+        await db_manager.db.users.update_many({"device_id": None}, {"$unset": {"device_id": ""}})
+
+        try:
+            await db_manager.db.users.drop_index("device_id_1")
+        except Exception:
+            pass
+
+        await db_manager.db.users.create_index(
+            "device_id",
+            unique=True,
+            sparse=True,
+        )
         await db_manager.db.sessions.create_index("session_id", unique=True)
         await db_manager.db.sessions.create_index("device_id")
         await db_manager.db.messages.create_index("session_id")

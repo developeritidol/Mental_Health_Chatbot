@@ -14,7 +14,7 @@ v2 changes:
     swapped independently from the main generator model.
 """
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, AliasChoices
 from functools import lru_cache
 from app.core.logger import get_logger
 
@@ -65,9 +65,9 @@ class Settings(BaseSettings):
 
     # ── JWT Authentication ────────────────────────────────────────────────────
     SECRET_KEY: str = Field(
-        default="changeme-use-a-real-secret-in-production",
-        validation_alias="JWT_SECRET_KEY",
-        description="Set via JWT_SECRET_KEY environment variable"
+        ...,
+        validation_alias=AliasChoices("JWT_SECRET_KEY", "SECRET_KEY"),
+        description="Set via JWT_SECRET_KEY or SECRET_KEY environment variable"
     )
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
@@ -82,4 +82,7 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     logger.debug("Loading application settings")
-    return Settings()
+    settings = Settings()
+    if not settings.SECRET_KEY:
+        raise RuntimeError("SECRET_KEY must be set")
+    return settings

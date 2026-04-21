@@ -14,7 +14,6 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Depends
 from datetime import datetime, timedelta
 from app.core.auth.oauth2 import get_current_user
-from app.core.auth.oauth2 import get_token
 
 from app.api.schemas.request import (
     UserRole,
@@ -33,12 +32,19 @@ from app.api.schemas.response import (
     RefreshTokenResponse,
     LogoutResponse,
     ResetPasswordResponse,
+    UserProfileData,
+    UserProfileResponse,
 )
-from app.models.db import UserModelDB
+from app.models.db import UserModelDB, AdminModelDB
+from bson import ObjectId
 from app.core.database import get_database
 from app.core.logger import get_logger
 from app.core.auth.hashing import Hash
-from app.core.auth.JWTtoken import create_access_token, create_refresh_token, verify_refresh_token
+from app.core.auth.JWTtoken import (
+    create_access_token, 
+    create_refresh_token, 
+    verify_refresh_token
+)
 from app.core.auth.token_blacklist import add_to_blacklist
 from app.services.email_service import generate_otp, validate_email, send_otp_email
 
@@ -65,6 +71,17 @@ def detect_identifier_type(identifier: str) -> Literal["email", "phone", "userna
 
 
 async def find_user_by_identifier(db, identifier: str):
+
+
+    # Try direct ID first if it looks like one
+    if len(identifier) == 24 and all(c in "0123456789abcdefABCDEF" for c in identifier):
+        try:
+            user = await db.users.find_one({"_id": ObjectId(identifier)})
+            if user:
+                return user
+        except:
+            pass
+
     try:
         identifier_type = detect_identifier_type(identifier)
     except ValueError:
@@ -138,6 +155,19 @@ async def user_register(payload: UserCreateRequest):
         practice_type_value       = payload.practice_type.value if payload.practice_type else None
         consultation_mode_value   = payload.consultation_mode.value if payload.consultation_mode else None
 
+        # Role-based Validation
+        if role_value == "admin":
+            admin_fields = [
+                professional_role_value, payload.license_number, payload.state_of_licensure, 
+                payload.npi_number, practice_type_value, payload.city, payload.state, consultation_mode_value
+            ]
+            
+            if not all(admin_fields) or any(str(f).lower() == "none" for f in admin_fields):
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Admin registration requires all professional fields (professional_role, license_number, state_of_licensure, npi_number, practice_type, city, state, consultation_mode). 'none' is not allowed."
+                )
+
         # Hash password and persist
         password_hash = Hash.bcrypt(payload.password)
 
@@ -158,8 +188,35 @@ async def user_register(payload: UserCreateRequest):
             role=role_value,
         )
 
-        result  = await db.users.insert_one(user.dict(by_alias=True, exclude_none=True))
+        # Insert user (base collection)
+        result = await db.users.insert_one(user.dict(by_alias=True, exclude_none=True))
         user_id = str(result.inserted_id)
+
+        # If admin, insert into admins collection with rollback support
+        if role_value == "admin":
+            try:
+                admin_data = AdminModelDB(
+                    user_id=user_id,
+                    full_name=full_name,
+                    email=email,
+                    password_hash=password_hash,
+                    phone_number=phone_number,
+                    role=role_value,
+                    professional_role=professional_role_value,
+                    license_number=payload.license_number,
+                    state_of_licensure=payload.state_of_licensure,
+                    npi_number=payload.npi_number,
+                    practice_type=practice_type_value,
+                    city=payload.city,
+                    state=payload.state,
+                    consultation_mode=consultation_mode_value
+                )
+                await db.admins.insert_one(admin_data.dict())
+            except Exception as e:
+                # Rollback user creation
+                await db.users.delete_one({"_id": result.inserted_id})
+                logger.error(f" Admin registration failed, rolling back user {user_id}. Error: {e}")
+                raise HTTPException(status_code=500, detail="Admin registration failed. Rolled back.")
 
         logger.info(f" User Registered: {email} | Role: {role_value} | ID: {user_id}")
 
@@ -218,8 +275,24 @@ async def user_login(payload: UserLoginRequest):
             {"$set": {"last_login": datetime.utcnow()}},
         )
 
-        user_data = {k: v for k, v in user_doc.items() if k not in ["password_hash", "_id"]}
-        user_data["user_id"] = str(user_doc["_id"])
+        user_data = UserProfileData(
+            full_name=user_doc.get("full_name", ""),
+            username=user_doc.get("username", ""),
+            email=user_doc.get("email", ""),
+            phone_number=user_doc.get("phone_number", ""),
+            role=user_doc.get("role", "user"),
+            professional_role=user_doc.get("professional_role"),
+            license_number=user_doc.get("license_number"),
+            state_of_licensure=user_doc.get("state_of_licensure"),
+            npi_number=user_doc.get("npi_number"),
+            practice_type=user_doc.get("practice_type"),
+            city=user_doc.get("city"),
+            state=user_doc.get("state"),
+            consultation_mode=user_doc.get("consultation_mode"),
+            user_id=str(user_doc["_id"]),
+            is_active=user_doc.get("is_active", True),
+            last_login=user_doc.get("last_login"),
+        )
 
         token_subject = user_doc.get("email") or user_doc.get("username") or str(user_doc["_id"])
         access_token = create_access_token(data={"sub": token_subject, "role": user_role})
@@ -228,7 +301,7 @@ async def user_login(payload: UserLoginRequest):
         identifier_type = detect_identifier_type(login_identifier)
         logger.info(
             f" Login Successful | Type: {identifier_type} | ID: {login_identifier} "
-            f"| Role: {user_role} | UID: {user_data['user_id']}"
+            f"| Role: {user_role} | UID: {user_data.user_id}"
         )
 
         return UserLoginResponse(
@@ -395,17 +468,17 @@ async def refresh_token(payload: RefreshTokenRequest):
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed")
 
-        user_doc = await db.users.find_one({"email": token_data.useremail})
+        user_doc = await find_user_by_identifier(db, token_data.sub)
         if not user_doc:
             raise HTTPException(status_code=401, detail="User not found")
 
         user_role = user_doc.get("role", "user")
-        token_subject = user_doc.get("email") or user_doc.get("username")
+        token_subject = user_doc.get("email") or user_doc.get("username") or str(user_doc["_id"])
 
         # Generate new access token
         access_token = create_access_token(data={"sub": token_subject, "role": user_role})
 
-        logger.info(f" Access token refreshed for: {token_data.useremail}")
+        logger.info(f" Access token refreshed for: {token_data.sub}")
 
         return RefreshTokenResponse(
             status="success",
@@ -421,10 +494,7 @@ async def refresh_token(payload: RefreshTokenRequest):
 
 
 @router.post("/logout", response_model=LogoutResponse)
-async def user_logout(
-    token: str = Depends(get_token),
-    user = Depends(get_current_user)
-):
+async def user_logout(token: str = Depends(get_current_user)):
     try:
         add_to_blacklist(token)
 
@@ -435,3 +505,4 @@ async def user_logout(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+

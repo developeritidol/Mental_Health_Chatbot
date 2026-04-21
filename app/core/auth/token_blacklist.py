@@ -8,7 +8,7 @@ def add_to_blacklist(token: str) -> None:
     _blacklisted_tokens.add(token)
 
 
-def is_blacklisted(token: str) -> bool:
+def is_token_blacklisted(token: str) -> bool:
     return token in _blacklisted_tokens
 
 

@@ -43,7 +43,7 @@ class UserModelDB(BaseModel):
 
 
 class AdminModelDB(BaseModel):
-    user_id: str
+    user_id: str = ""
     full_name: str
     email: str
     password_hash: str
@@ -63,7 +63,7 @@ class AdminModelDB(BaseModel):
 
 class SessionModelDB(BaseModel):
     session_id: str
-    user_id: str
+    user_id: str = ""
     doctor_id: Optional[str] = None
     started_at: datetime = Field(default_factory=datetime.utcnow)
     ended_at: Optional[datetime] = None
@@ -92,7 +92,7 @@ class LLMConsensus(BaseModel):
 class MessageModelDB(BaseModel):
     session_id: str
     sender_type: str = "user"  # "user" or "doctor" or "assistant"
-    sender_id: str
+    sender_id: str = ""
     turn_number: int = 1
     role: str
     content: str

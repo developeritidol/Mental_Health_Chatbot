@@ -1,22 +1,24 @@
-"""
-Chat Route
-──────────
-POST /api/chat/stream — SSE streaming chat.
-Android sends only: session_id, user_id, message.
-Server loads profile and full history from MongoDB.
-"""
-
 import json
 from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
-from app.core.database import get_database
-from app.api.routes.human import manager
-from app.core.config import get_settings
+# Schemas
 from app.api.schemas.request import StreamChatRequest
-from app.api.schemas.response import ChatHistoryResponse, ChatMessageResponse, SessionListResponse, SessionResponse
+from app.api.schemas.response import (
+    ChatHistoryResponse,
+    ChatMessageResponse,
+    SessionListResponse,
+    SessionResponse,
+)
+
+# Core
+from app.core.database import get_database
 from app.core.auth.oauth2 import get_current_user
+from app.core.logger import get_logger
+
+# Services
 from app.services import emotion as emotion_svc
 from app.services import llm as llm_svc
 from app.services.safety import synthesize_consensus
@@ -32,7 +34,6 @@ from app.services.db_service import (
     is_user_escalated,
     get_existing_session,
 )
-from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -70,7 +71,7 @@ def _safe_fallback_consensus() -> dict:
 # ── SSE Stream ─────────────────────────────────────────────────────────────────
 
 @router.post("/stream")
-async def stream_message(req: StreamChatRequest, user = Depends(get_current_user)):
+async def stream_message(req: StreamChatRequest, current_user = Depends(get_current_user)):
     """
     Main chat endpoint for Android.
     Android sends: session_id + user_id + message.
@@ -79,8 +80,10 @@ async def stream_message(req: StreamChatRequest, user = Depends(get_current_user
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
+    user_id = str(current_user.get("user_id") or current_user.get("_id"))
+
     # 1. Load profile from DB
-    profile = await get_user_profile(req.user_id)
+    profile = await get_user_profile(user_id)
     if not profile:
         raise HTTPException(
             status_code=404,
@@ -264,10 +267,10 @@ async def get_chat_history(current_user = Depends(get_current_user)):
     Used by Android to load conversation history when opening a session.
     """
     db = get_database()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed.")
 
-    user_id = current_user.user_id if hasattr(current_user, 'user_id') else current_user.get("user_id")
+    user_id = str(current_user.get("user_id") or current_user.get("_id"))
 
     cursor = db.messages.find({"user_id": user_id}).sort("timestamp", 1)
     docs = await cursor.to_list(length=None)
@@ -302,10 +305,10 @@ async def get_user_sessions(current_user = Depends(get_current_user)):
     """
     
     db = get_database()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed.")
 
-    user_id = current_user.user_id if hasattr(current_user, 'user_id') else current_user.get("user_id")
+    user_id = str(current_user.get("user_id") or current_user.get("_id"))
 
     cursor = db.sessions.find({"user_id": user_id}).sort("created_at", -1)
     docs = await cursor.to_list(length=None)

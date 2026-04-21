@@ -16,6 +16,7 @@ v2 changes:
 
 from pydantic import Field
 from pydantic_settings import BaseSettings
+from pydantic import Field
 from functools import lru_cache
 from app.core.logger import get_logger
 

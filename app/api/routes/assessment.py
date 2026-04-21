@@ -32,11 +32,15 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
        - If YES: returns the existing session_id (no new session created)
        - If NO:  creates a new session + generates opening message
     """
-    user_id = current_user.user_id if hasattr(current_user, 'user_id') else current_user.get("user_id")
+
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required. Please log in.")
+
+    user_id = str(current_user.get("user_id") or current_user.get("_id"))
     logger.info(f"Assessment received for user: {user_id}")
 
     db = get_database()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed")
 
     # 1. Save/update profile + personality

@@ -1,9 +1,6 @@
 from pydantic import BaseModel, Field, EmailStr
 from typing import Optional
 from enum import Enum
-import os
-
-DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 
 # 1. ENUMS (Define these first so they are ready for the classes below)
 class UserRole(str, Enum):
@@ -55,14 +52,14 @@ class AssessmentRequest(BaseModel):
     personality_answers: PersonalityAnswers
 
 class UserCreateRequest(BaseModel):
-    full_name: str = Field(..., min_length=3, max_length=100) if DEMO_MODE else Field(..., min_length=3, max_length=100, pattern=r"^[a-zA-Z ]+$")
+    full_name: str = Field(..., min_length=3, max_length=100, pattern=r"^[a-zA-Z ]+$")
     username: str = Field(..., min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_]+$")
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=128)
-    phone_number: str = Field(...) if DEMO_MODE else Field(..., pattern=r"^\+?[1-9]\d{1,14}$")
+    phone_number: str = Field(..., pattern=r"^\+?[1-9]\d{1,14}$")
     role: UserRole = Field(default=UserRole.user)
     professional_role: Optional[ProfessionalRole] = None
-    license_number: Optional[str] = Field(None, min_length=1, max_length=50)
+    license_number: Optional[str] = Field(None, max_length=50)
     state_of_licensure: Optional[str] = Field(None, min_length=1, max_length=50)
     npi_number: Optional[str] = Field(None, max_length=10)
     practice_type: Optional[PracticeType] = None

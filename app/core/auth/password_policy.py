@@ -1,4 +1,3 @@
-import os
 import re
 from fastapi import HTTPException
 
@@ -7,8 +6,6 @@ PASSWORD_PATTERN = re.compile(r"^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,128}$"
 
 
 def validate_password(password: str) -> None:
-    if os.getenv("DEMO_MODE", "false").lower() == "true":
-        return
     if not PASSWORD_PATTERN.match(password or ""):
         raise HTTPException(
             status_code=400,

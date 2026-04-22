@@ -89,8 +89,8 @@ class TranscriptionResponse(BaseModel):
 # ── Token / Auth ──────────────────────────────────────────────
 
 class TokenData(BaseModel):
-    sub: str
-    user_id: Optional[str] = None
+    user_id: str
+    email: str
     role: Optional[str] = None
 
 

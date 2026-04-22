@@ -15,6 +15,9 @@ from fastapi import APIRouter, HTTPException, Depends
 from fastapi.concurrency import run_in_threadpool
 from datetime import datetime, timedelta
 from app.core.auth.oauth2 import get_current_user
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+token_auth_scheme = HTTPBearer()
 
 from app.api.schemas.request import (
     UserRole,
@@ -542,18 +545,18 @@ async def refresh_token(payload: RefreshTokenRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@router.post("/logout", response_model=LogoutResponse)
+@router.post("/logout")
 async def user_logout(
-    token: str = Depends(get_current_user),
-    _=Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials = Depends(token_auth_scheme),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
-        await run_in_threadpool(add_to_blacklist, token)
+        await run_in_threadpool(add_to_blacklist, credentials.credentials)
 
-        return LogoutResponse(
-            status="success",
-            message="Logout successful"
-        )
+        return {
+            "status": "success", 
+            "message": "Successfully logged out"
+        }
 
     except Exception as e:
         logger.error(f"event=logout_failed error={str(e)}")

@@ -7,7 +7,7 @@ logger = get_logger(__name__)
 async def create_admin(db, user_id: str, admin_payload: dict) -> bool:
     try:
         admin_data = AdminModelDB(user_id=user_id, **admin_payload)
-        await db.admins.insert_one(admin_data.dict())
+        await db.admins.insert_one(admin_data.model_dump())
         logger.info(f"event=admin_created user_id={user_id}")
         return True
     except Exception as e:

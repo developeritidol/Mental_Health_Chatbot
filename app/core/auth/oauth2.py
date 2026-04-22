@@ -1,19 +1,22 @@
-from fastapi import Depends, HTTPException, status, Security
-from fastapi.security import HTTPBearer
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from app.core.logger import get_logger
 
 from app.core.auth.JWTtoken import verify_token
 
-security = HTTPBearer()
+logger = get_logger(__name__)
+
+token_auth_scheme = HTTPBearer()
 
 
-async def get_current_user(credentials=Security(security)):
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(token_auth_scheme)):
     token = credentials.credentials
 
     # Fix Swagger double "Bearer Bearer"
     if token.startswith("Bearer "):
         token = token.split(" ")[1]
 
-    print("CLEAN TOKEN RECEIVED:", token)
+    logger.debug(f"Token received for validation: {token[:20]}...")
 
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -24,12 +27,12 @@ async def get_current_user(credentials=Security(security)):
     # Decode + validate token
     token_data = verify_token(token, credentials_exception)
 
-    # ✅ FIXED: use `sub` instead of `useremail`
+    # ✅ FIXED: use user_id as primary key
     user_doc = {
         "_id": token_data.user_id,
         "user_id": token_data.user_id,
-        "email": token_data.sub,
-        "useremail": token_data.sub,  # optional (keep if your code expects it)
+        "email": token_data.email,
+        # "useremail": token_data.email,  # optional (keep if your code expects it)
         "role": token_data.role,
         "token": token  # IMPORTANT for logout
     }

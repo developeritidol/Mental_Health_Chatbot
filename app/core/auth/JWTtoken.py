@@ -82,13 +82,13 @@ def verify_refresh_token(token: str, credentials_exception):
         token_type = payload.get("type")
         role = payload.get("role")
 
-        if useremail is None or token_type != "refresh":
+        if user_id is None or token_type != "refresh":
             logger.warning("event=refresh_token_rejected reason=invalid_claims")
             raise credentials_exception
 
         token_data = TokenData(
-            sub=useremail,
             user_id=user_id,
+            email=useremail,
             role=role
         )
 
@@ -129,18 +129,18 @@ def verify_token(token: str, credentials_exception):
             algorithms=[settings.ALGORITHM]
         )
 
-        useremail = payload.get("sub")
         user_id = payload.get("user_id")
+        email = payload.get("sub")
         token_type = payload.get("type")
         role = payload.get("role")
 
-        if useremail is None or token_type != "access":
+        if user_id is None or token_type != "access":
             logger.warning("event=access_token_rejected reason=invalid_claims")
             raise credentials_exception
 
         token_data = TokenData(
-            sub=useremail,
             user_id=user_id,
+            email=email,
             role=role
         )
 

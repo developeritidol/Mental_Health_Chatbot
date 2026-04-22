@@ -14,6 +14,7 @@ from app.api.schemas.response import (
 )
 
 # Core
+from app.core.database import get_database
 from app.core.auth.oauth2 import get_current_user
 from app.core.logger import get_logger
 
@@ -27,10 +28,10 @@ from app.services.db_service import (
     save_message,
     generate_embedding,
     retrieve_long_term_memory,
-    get_device_messages,
+    get_user_messages,
     get_all_sessions,
     escalate_session,
-    is_device_escalated,
+    is_user_escalated,
     get_existing_session,
 )
 
@@ -70,35 +71,35 @@ def _safe_fallback_consensus() -> dict:
 # ── SSE Stream ─────────────────────────────────────────────────────────────────
 
 @router.post("/stream")
-async def stream_message(req: StreamChatRequest, user = Depends(get_current_user)):
+async def stream_message(req: StreamChatRequest, current_user = Depends(get_current_user)):
     """
     Main chat endpoint for Android.
-    Android sends: session_id + device_id + message.
+    Android sends: session_id + user_id + message.
     Server loads profile and history from MongoDB automatically.
     """
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
+    user_id = str(current_user.get("user_id") or current_user.get("_id"))
+
     # 1. Load profile from DB
-    profile = await get_user_profile(req.device_id)
+    profile = await get_user_profile(user_id)
     if not profile:
         raise HTTPException(
             status_code=404,
             detail="Profile not found. Complete assessment first.",
         )
 
-    # Resolve active session if needed for backwards compat
-    session_info = await get_existing_session(req.device_id)
-    actual_session_id = session_info["session_id"] if session_info else req.device_id
+    # Use the session_id provided by the client
+    actual_session_id = req.session_id
 
     # 1b. Guard: If this session is currently escalated to a human,
     #     block AI and redirect Android back to the WebSocket.
-    if await is_device_escalated(req.device_id):
-        from app.core.config import get_settings
+    if await is_user_escalated(req.user_id):
         _settings = get_settings()
-        ws_url = f"ws://{_settings.SERVER_HOST}:{_settings.SERVER_PORT}/api/human/chat/{req.device_id}"
+        ws_url = f"ws://{_settings.SERVER_HOST}:{_settings.SERVER_PORT}/api/human/chat/{req.user_id}"
 
-        logger.info(f"[GUARD] Device {req.device_id} is escalated. Blocking AI and sending redirect.")
+        logger.info(f"[GUARD] User {req.user_id} is escalated. Blocking AI and sending redirect.")
         
         redirect_payload = {
             "done": True,
@@ -123,14 +124,14 @@ async def stream_message(req: StreamChatRequest, user = Depends(get_current_user
     recent_history_str = _build_recent_history_string(history, n_turns=4)
 
     logger.info("\n" + "═" * 70)
-    logger.info(f"[STREAM] Device: {req.device_id} | Session: {actual_session_id} | Turn: {turn_count}")
+    logger.info(f"[STREAM] User: {req.user_id} | Session: {actual_session_id} | Turn: {turn_count}")
     logger.info(f"[USER]:  {req.message}")
     logger.info("═" * 70)
 
     # 3. Generate embedding and retrieve long-term memory (RAG)
     query_vector = await generate_embedding(req.message)
     long_term_memory = await retrieve_long_term_memory(
-        device_id=req.device_id,
+        user_id=req.user_id,
         query_vector=query_vector,
         exclude_session_id=actual_session_id,
     )
@@ -138,7 +139,7 @@ async def stream_message(req: StreamChatRequest, user = Depends(get_current_user
     # 4. Save user message to DB (embedding is stored inside save_message automatically)
     await save_message({
         "session_id": actual_session_id,
-        "device_id": req.device_id,
+        "user_id": req.user_id,
         "turn_number": turn_count + 1,
         "role": "user",
         "content": req.message,
@@ -180,14 +181,14 @@ async def stream_message(req: StreamChatRequest, user = Depends(get_current_user
 
     # ── STEP 6: Crisis fork — escalate to human but stream normally ───────────
     if consensus.get("is_crisis") is True:
-        logger.warning(f"[ESCALATION] Crisis detected for device {req.device_id}. Escalating in background and streaming AI response consistently.")
+        logger.warning(f"[ESCALATION] Crisis detected for user {req.user_id}. Escalating in background and streaming AI response consistently.")
         await escalate_session(actual_session_id)
         
-        from app.api.routes.human import manager
+        
         await manager.broadcast_to_dashboard({
             "type": "new_escalation",
             "session_id": actual_session_id,
-            "device_id": req.device_id,
+            "user_id": req.user_id,
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
 
@@ -235,7 +236,7 @@ async def stream_message(req: StreamChatRequest, user = Depends(get_current_user
 
             await save_message({
                 "session_id": actual_session_id,
-                "device_id": req.device_id,
+                "user_id": req.user_id,
                 "turn_number": turn_count + 1,
                 "role": "assistant",
                 "content": final,
@@ -258,42 +259,69 @@ async def stream_message(req: StreamChatRequest, user = Depends(get_current_user
 
 # ── Chat History API (by session_id) ──────────────────────────────────────────
 
-@router.get("/history/{device_id}", response_model=ChatHistoryResponse)
-async def get_chat_history(device_id: str, user = Depends(get_current_user)):
+@router.get("/history", response_model=ChatHistoryResponse)
+async def get_chat_history(current_user = Depends(get_current_user)):
     """
-    Returns ALL messages for a specific device_id, sorted chronologically.
+    Returns ALL messages for the authenticated user, sorted chronologically.
     Used by Android to load conversation history when opening a session.
     """
-    if not device_id.strip():
-        raise HTTPException(status_code=400, detail="Device ID is required.")
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
 
-    messages = await get_device_messages(device_id)
+    user_id = str(current_user.get("user_id") or current_user.get("_id"))
 
-    formatted_messages = [
-        ChatMessageResponse(**msg)
-        for msg in messages
-    ]
+    cursor = db.messages.find({"user_id": user_id}).sort("timestamp", 1)
+    docs = await cursor.to_list(length=None)
+
+    formatted_messages = []
+    for doc in docs:
+        if doc.get("content"):
+            formatted_messages.append(
+                ChatMessageResponse(
+                    user_id=doc.get("user_id", user_id),
+                    role=doc.get("role", "unknown"),
+                    content=doc.get("content", ""),
+                    timestamp=doc.get("timestamp").replace(tzinfo=timezone.utc) if doc.get("timestamp") else None
+                )
+            )
 
     return ChatHistoryResponse(
         status="success",
-        device_id=device_id,
+        user_id=user_id,
         total_messages=len(formatted_messages),
         messages=formatted_messages,
     )
 
 
-# ── Sessions List API (by device_id) ─────────────────────────────────────────
+# ── Sessions List API (by user_id) ─────────────────────────────────────────
 
-@router.get("/sessions/{device_id}", response_model=SessionListResponse)
-async def get_device_sessions(device_id: str, user = Depends(get_current_user)):
+@router.get("/sessions", response_model=SessionListResponse)
+async def get_user_sessions(current_user = Depends(get_current_user)):
     """
-    Returns ALL sessions for a specific device_id, sorted newest first.
+    Returns ALL sessions for the authenticated user, sorted newest first.
     Used by Android to list all past conversations when the app is reopened.
     """
-    if not device_id.strip():
-        raise HTTPException(status_code=400, detail="Device ID is required.")
+    
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
 
-    sessions = await get_all_sessions(device_id)
+    user_id = str(current_user.get("user_id") or current_user.get("_id"))
+
+    cursor = db.sessions.find({"user_id": user_id}).sort("created_at", -1)
+    docs = await cursor.to_list(length=None)
+
+    sessions = []
+    for doc in docs:
+        sessions.append({
+            "session_id": doc.get("session_id"),
+            "user_id": doc.get("user_id", user_id),
+            "is_active": doc.get("is_active", False),
+            "is_escalated": doc.get("is_escalated", False),
+            "created_at": doc.get("created_at").replace(tzinfo=timezone.utc) if doc.get("created_at") else None,
+            "updated_at": doc.get("updated_at").replace(tzinfo=timezone.utc) if doc.get("updated_at") else None,
+        })
 
     formatted_sessions = [
         SessionResponse(**s)
@@ -302,7 +330,7 @@ async def get_device_sessions(device_id: str, user = Depends(get_current_user)):
 
     return SessionListResponse(
         status="success",
-        device_id=device_id,
+        user_id=user_id,
         total_sessions=len(formatted_sessions),
         sessions=formatted_sessions,
     )

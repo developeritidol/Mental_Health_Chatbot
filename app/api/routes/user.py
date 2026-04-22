@@ -222,8 +222,9 @@ async def user_login(payload: UserLoginRequest):
         user_data["user_id"] = str(user_doc["_id"])
 
         token_subject = user_doc.get("email") or user_doc.get("username") or str(user_doc["_id"])
-        access_token = create_access_token(data={"sub": token_subject, "role": user_role})
-        refresh_token = create_refresh_token(data={"sub": token_subject})
+        user_id_str = str(user_doc["_id"])
+        access_token = create_access_token(data={"sub": token_subject, "role": user_role, "user_id": user_id_str})
+        refresh_token = create_refresh_token(data={"sub": token_subject, "user_id": user_id_str})
 
         identifier_type = detect_identifier_type(login_identifier)
         logger.info(
@@ -401,9 +402,10 @@ async def refresh_token(payload: RefreshTokenRequest):
 
         user_role = user_doc.get("role", "user")
         token_subject = user_doc.get("email") or user_doc.get("username")
+        user_id_str = str(user_doc["_id"])
 
         # Generate new access token
-        access_token = create_access_token(data={"sub": token_subject, "role": user_role})
+        access_token = create_access_token(data={"sub": token_subject, "role": user_role, "user_id": user_id_str})
 
         logger.info(f" Access token refreshed for: {token_data.useremail}")
 

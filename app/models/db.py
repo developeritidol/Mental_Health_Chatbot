@@ -10,7 +10,7 @@ class EmergencyContact(BaseModel):
 
 
 class UserModelDB(BaseModel):
-    device_id: Optional[str] = None
+    user_id: Optional[str] = None
     name: Optional[str] = None
     gender: Optional[str] = None
     age: Optional[int] = None
@@ -44,7 +44,7 @@ class UserModelDB(BaseModel):
 
 class SessionModelDB(BaseModel):
     session_id: str
-    device_id: str
+    user_id: str
     is_active: bool = True
     lethality_alert: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)

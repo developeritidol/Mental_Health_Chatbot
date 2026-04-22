@@ -12,10 +12,14 @@ def get_token(authorization: str = Header(None)):
 
 security = HTTPBearer()
 
-def get_current_user(credentials = Security(security)):
+async def get_current_user(credentials = Security(security)):
     token = credentials.credentials
 
-    print("TOKEN RECEIVED:", token)
+    # 1. Strip "Bearer " if Swagger acciden tally doubled it
+    if token.startswith("Bearer "):
+        token = token.split(" ")[1]
+
+    print("CLEAN TOKEN RECEIVED:", token)
 
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -23,18 +27,17 @@ def get_current_user(credentials = Security(security)):
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-    #  REMOVE manual blacklist check from here
-
-    #  Single source of truth
+    # 2. Single source of truth for decoding and checking blacklist
+    # (This uses the verify_token function imported from JWTtoken.py)
     token_data = verify_token(token, credentials_exception)
 
-    return token_data
+    # 3. Create a stateless user object directly from the token data!
+    user_doc = {
+        "_id": token_data.user_id,         
+        "user_id": token_data.user_id,     
+        "email": token_data.useremail,     
+        "useremail": token_data.useremail
+    }
 
-def verify_token(token: str, credentials_exception):
-
-    #  ONLY place where blacklist is checked
-    if is_blacklisted(token):
-        raise HTTPException(
-            status_code=401,
-            detail="Token has been revoked",
-        )
+    # 4. Return the dictionary so chat.py gets the user_id instantly
+    return user_doc

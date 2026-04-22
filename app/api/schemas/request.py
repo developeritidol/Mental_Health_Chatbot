@@ -44,7 +44,7 @@ class PersonalityAnswers(BaseModel):
     trusts_instincts: str = "Sometimes"
 
 class AssessmentRequest(BaseModel):
-    device_id: str = Field(..., min_length=1)
+    """POST /api/assessment — one-time onboarding from Android."""
     profile: ProfileInput
     personality_answers: PersonalityAnswers
 
@@ -72,7 +72,9 @@ class ForgotPasswordRequest(BaseModel):
     email: str = Field(..., pattern=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
 class StreamChatRequest(BaseModel):
-    device_id: str = Field(..., min_length=1)
+    """POST /api/chat/stream — every chat message from Android."""
+    user_id: str = Field(..., min_length=1)
+    session_id: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1, max_length=2000)
 
 class VerifyOtpRequest(BaseModel):

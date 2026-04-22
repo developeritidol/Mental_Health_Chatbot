@@ -6,6 +6,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.services.emotion import warmup
+from app.core.database import connect_to_mongo, close_mongo_connection
 from app.core.config import get_settings
 from app.core.logger import get_logger
 from app.api.routes import chat, audio, assessment, human, user
@@ -20,13 +22,11 @@ async def lifespan(app: FastAPI):
     logger.info("MindBridge starting up...")
     
     # 1. Connect to MongoDB
-    from app.core.database import connect_to_mongo, close_mongo_connection
     await connect_to_mongo()
     
     # 2. Warm up the HuggingFace emotion model in a background thread
     loop = asyncio.get_event_loop()
     try:
-        from app.services.emotion import warmup
         await loop.run_in_executor(None, warmup)
     except Exception as e:
         logger.warning(f"Model warmup skipped: {e}")

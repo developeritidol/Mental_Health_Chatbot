@@ -53,12 +53,13 @@ def verify_refresh_token(token: str, credentials_exception):
             algorithms=[settings.ALGORITHM]
         )
         useremail: str = payload.get("sub")
+        user_id: str = payload.get("user_id")
         token_type: str = payload.get("type")
 
         if useremail is None or token_type != "refresh":
             raise credentials_exception
 
-        token_data = TokenData(useremail=useremail)
+        token_data = TokenData(useremail=useremail, user_id=user_id)
         return token_data
     except ExpiredSignatureError:
         # Return 403 for expired refresh token so frontend knows to logout
@@ -88,12 +89,13 @@ def verify_token(token: str, credentials_exception):
             algorithms=[settings.ALGORITHM]
         )
         useremail: str = payload.get("sub")
+        user_id: str = payload.get("user_id")
         token_type: str = payload.get("type")
 
         if useremail is None or token_type != "access":
             raise credentials_exception
 
-        token_data = TokenData(useremail=useremail)
+        token_data = TokenData(useremail=useremail, user_id=user_id)
         return token_data
     except ExpiredSignatureError:
         # Handle expired token specifically

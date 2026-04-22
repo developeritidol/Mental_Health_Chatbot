@@ -42,9 +42,37 @@ class UserModelDB(BaseModel):
     last_active: datetime = Field(default_factory=datetime.utcnow)
 
 
+class AdminModelDB(BaseModel):
+    user_id: str = ""
+    full_name: str
+    email: str
+    password_hash: str
+    phone_number: str
+    role: str = "admin"
+    professional_role: str
+    license_number: str
+    state_of_licensure: str
+    npi_number: str
+    practice_type: str
+    city: str
+    state: str
+    consultation_mode: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_login: Optional[datetime] = None
+
+
 class SessionModelDB(BaseModel):
     session_id: str
+<<<<<<< HEAD
+    user_id: str = ""
+    doctor_id: Optional[str] = None
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    ended_at: Optional[datetime] = None
+    status: str = "active"
+    summary: Optional[str] = None
+=======
     user_id: str
+>>>>>>> 1317e4c411bdef0b6b5dba31035af40b6db0bd5b
     is_active: bool = True
     lethality_alert: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -67,7 +95,9 @@ class LLMConsensus(BaseModel):
 
 class MessageModelDB(BaseModel):
     session_id: str
-    turn_number: int
+    sender_type: str = "user"  # "user" or "doctor" or "assistant"
+    sender_id: str = ""
+    turn_number: int = 1
     role: str
     content: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)

@@ -1,17 +1,19 @@
-from fastapi import Depends, HTTPException, status, Header, Security
+from fastapi import Depends, HTTPException, status, Security
 from fastapi.security import HTTPBearer
 
 from app.core.auth.JWTtoken import verify_token
-from app.core.auth.token_blacklist import is_blacklisted
+from app.api.schemas.response import TokenData
 
-def get_token(authorization: str = Header(None)):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    return authorization.split(" ")[1]
 
 security = HTTPBearer()
 
+<<<<<<< HEAD
+def get_current_token(credentials = Security(security)):
+    return credentials.credentials
+
+def get_current_user(credentials = Security(security)):
+    token = credentials.credentials
+=======
 async def get_current_user(credentials = Security(security)):
     token = credentials.credentials
 
@@ -21,12 +23,26 @@ async def get_current_user(credentials = Security(security)):
 
     print("CLEAN TOKEN RECEIVED:", token)
 
+>>>>>>> 1317e4c411bdef0b6b5dba31035af40b6db0bd5b
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid authentication credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
 
+<<<<<<< HEAD
+    # Single source of truth - uses the imported verify_token from JWTtoken
+    token_data = verify_token(token, credentials_exception)
+    return token_data
+
+def get_current_admin(token_data: TokenData = Depends(get_current_user)):
+    if token_data.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The user does not have enough privileges"
+        )
+    return token_data
+=======
     # 2. Single source of truth for decoding and checking blacklist
     # (This uses the verify_token function imported from JWTtoken.py)
     token_data = verify_token(token, credentials_exception)
@@ -41,3 +57,4 @@ async def get_current_user(credentials = Security(security)):
 
     # 4. Return the dictionary so chat.py gets the user_id instantly
     return user_doc
+>>>>>>> 1317e4c411bdef0b6b5dba31035af40b6db0bd5b

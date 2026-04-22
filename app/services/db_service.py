@@ -162,12 +162,9 @@ async def get_user_profile(user_id: str) -> Optional[dict]:
 
         # Build the profile dict that the LLM service expects
         ec = doc.get("emergency_contact", {}) or {}
-        first_name = (doc.get("first_name") or "").strip() or "Friend"
-        last_name  = (doc.get("last_name") or "").strip()
         return {
             "user_id": user_id,
-            "first_name": first_name,                                          # used for US-style address ("Hey Sarah,")
-            "name": f"{first_name} {last_name}".strip() or first_name,        # full name kept for identity context
+            "name": f"{doc.get('first_name', 'Friend')} {doc.get('last_name', '')}".strip() or "Friend",
             "gender": doc.get("gender", ""),
             "age": doc.get("age"),
             "personality_summary": doc.get("personality_summary", "Not provided"),

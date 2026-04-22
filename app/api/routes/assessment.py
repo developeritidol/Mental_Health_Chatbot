@@ -121,7 +121,6 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
     await save_message({
         "session_id": session_id,
         "user_id": user_id,
-        "user_id": user_id, # maintaining backward compatibility in db service
         "turn_number": 0,
         "role": "assistant",
         "content": opening,

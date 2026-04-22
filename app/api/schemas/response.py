@@ -90,6 +90,7 @@ class TranscriptionResponse(BaseModel):
 
 class TokenData(BaseModel):
     useremail: str
+    user_id: Optional[str] = None
 
 
 class UserSignupResponse(BaseModel):

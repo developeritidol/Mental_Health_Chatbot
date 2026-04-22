@@ -22,7 +22,8 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends, status
+from app.core.auth.JWTtoken import verify_token
 from app.services.db_service import (
     save_message,
     get_escalated_sessions,
@@ -72,7 +73,7 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
     for doc in docs:
         sessions.append({
             "session_id": doc.get("session_id"),
-            "user_id": doc.get("user_id", doc.get("user_id")), # Map user_id back for compat
+            "user_id": doc.get("user_id"),
             "is_active": doc.get("is_active", True),
             "is_escalated": doc.get("is_escalated", True),
             "lethality_alert": doc.get("lethality_alert", False),
@@ -362,7 +363,7 @@ async def inactivity_watchdog():
             
             for expired_info in expired_sessions:
                 session_id = expired_info["session_id"]
-                user_id = expired_info.get("user_id", expired_info.get("user_id", "unknown"))
+                user_id = expired_info.get("user_id", "unknown")
                 
                 logger.warning(f"[WATCHDOG] Session '{session_id}' (User '{user_id}') inactive for 35 mins. Closing.")
                 
@@ -421,7 +422,7 @@ async def dashboard_notifications_ws(websocket: WebSocket):
 
 
 @router.websocket("/chat/{user_id}")
-async def human_chat_ws(websocket: WebSocket, user_id: str):
+async def human_chat_ws(websocket: WebSocket, user_id: str, token: str):
     """
     Real-time human handoff endpoint.
 
@@ -430,6 +431,21 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
       ?role=human_counselor → for the admin dashboard
       ?counselor_name=...   → custom name shown in Android UI
     """
+    # 1. Define the exception for invalid tokens
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    # 2. Verify the token BEFORE accepting the websocket connection
+    try:
+        token_data = verify_token(token, credentials_exception)
+    except HTTPException:
+        # Reject the connection immediately if token is invalid or missing
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     role = websocket.query_params.get("role", "user")
     counselor_name = websocket.query_params.get("counselor_name", "Crisis Support Team")
 
@@ -452,6 +468,7 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
             await websocket.close(code=4003)
             return
 
+    # 3. If token is valid, proceed with connection
     await manager.connect(user_id, websocket)
     logger.info(f"[WS] Role '{role}' joined room '{user_id}'")
 

@@ -1,7 +1,6 @@
 from fastapi import Depends, HTTPException, status, Header, Security
 from fastapi.security import HTTPBearer
 
-from app.core.database import get_database
 
 from app.core.auth.JWTtoken import verify_token
 from app.core.auth.token_blacklist import is_blacklisted
@@ -14,7 +13,6 @@ def get_token(authorization: str = Header(None)):
 
 security = HTTPBearer()
 
-# Made this async so it can query the database
 async def get_current_user(credentials = Security(security)):
     token = credentials.credentials
 
@@ -34,15 +32,13 @@ async def get_current_user(credentials = Security(security)):
     # (This uses the verify_token function imported from JWTtoken.py)
     token_data = verify_token(token, credentials_exception)
 
-    # 3. Connect to DB to find the real user_id associated with this email
-    db = get_database()
-    if db is None:
-        raise HTTPException(status_code=500, detail="Database connection failed.")
+    # 3. Create a stateless user object directly from the token data!
+    user_doc = {
+        "_id": token_data.user_id,         
+        "user_id": token_data.user_id,     
+        "email": token_data.useremail,     
+        "useremail": token_data.useremail
+    }
 
-    user_doc = await db.users.find_one({"email": token_data.useremail})
-    
-    if not user_doc:
-        raise HTTPException(status_code=404, detail="User account not found in database.")
-
-    # 4. Return the full database document so chat.py gets the user_id!
+    # 4. Return the dictionary so chat.py gets the user_id instantly
     return user_doc

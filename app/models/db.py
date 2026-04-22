@@ -63,20 +63,18 @@ class AdminModelDB(BaseModel):
 
 class SessionModelDB(BaseModel):
     session_id: str
-<<<<<<< HEAD
     user_id: str = ""
     doctor_id: Optional[str] = None
     started_at: datetime = Field(default_factory=datetime.utcnow)
     ended_at: Optional[datetime] = None
     status: str = "active"
     summary: Optional[str] = None
-=======
-    user_id: str
->>>>>>> 1317e4c411bdef0b6b5dba31035af40b6db0bd5b
-    is_active: bool = True
-    lethality_alert: bool = False
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # user_id: str
+    # is_active: bool = True
+    # lethality_alert: bool = False
+    # created_at: datetime = Field(default_factory=datetime.utcnow)
+    # updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class RobertaAnalysis(BaseModel):

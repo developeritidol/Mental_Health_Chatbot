@@ -14,7 +14,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.concurrency import run_in_threadpool
 from datetime import datetime, timedelta
-from app.core.auth.oauth2 import get_current_user, get_current_token
+from app.core.auth.oauth2 import get_current_user
 
 from app.api.schemas.request import (
     UserRole,
@@ -293,6 +293,17 @@ async def user_login(payload: UserLoginRequest):
 
         validate_account_status(user_doc)
 
+        # Reset any stale escalation states for this user
+        await db.sessions.update_many(
+            {"user_id": str(user_doc["_id"]), "is_escalated": True},
+            {"$set": {
+                "is_escalated": False,
+                "escalation_closed_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            }}
+        )
+        logger.info(f"[LOGIN RESET] Cleared stale escalation states for user {str(user_doc['_id'])}")
+
         await db.users.update_one(
             {"_id": user_doc["_id"]},
             {"$set": {"last_login": datetime.utcnow()}},
@@ -509,12 +520,9 @@ async def refresh_token(payload: RefreshTokenRequest):
             raise HTTPException(status_code=401, detail="User not found")
 
         user_role = user_doc.get("role", "user")
-<<<<<<< HEAD
         token_subject = user_doc.get("email") or user_doc.get("username") or str(user_doc["_id"])
-=======
-        token_subject = user_doc.get("email") or user_doc.get("username")
-        user_id_str = str(user_doc["_id"])
->>>>>>> 1317e4c411bdef0b6b5dba31035af40b6db0bd5b
+        # token_subject = user_doc.get("email") or user_doc.get("username")
+        # user_id_str = str(user_doc["_id"])
 
         # Generate new access token
         access_token = create_access_token(data={"sub": token_subject, "role": user_role, "user_id": user_id_str})
@@ -536,7 +544,7 @@ async def refresh_token(payload: RefreshTokenRequest):
 
 @router.post("/logout", response_model=LogoutResponse)
 async def user_logout(
-    token: str = Depends(get_current_token),
+    token: str = Depends(get_current_user),
     _=Depends(get_current_user),
 ):
     try:
@@ -551,3 +559,357 @@ async def user_logout(
         logger.error(f"event=logout_failed error={str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+
+
+
+
+
+# """
+# User Routes
+# -----------
+# POST /api/users/register
+# POST /api/users/login
+# POST /api/users/forgot-password
+# POST /api/users/verify-otp
+# POST /api/users/reset-password
+# POST /api/users/logout
+# """
+
+# import re
+# from typing import Literal
+# from fastapi import APIRouter, HTTPException, Depends
+# from fastapi.concurrency import run_in_threadpool
+# from datetime import datetime, timedelta
+# from app.core.auth.oauth2 import get_current_user
+
+# from app.api.schemas.request import (
+#     UserRole,
+#     VerifyOtpRequest,
+#     ResetPasswordRequest,
+#     UserCreateRequest,
+#     UserLoginRequest,
+#     ForgotPasswordRequest,
+#     RefreshTokenRequest,
+# )
+# from app.api.schemas.response import (
+#     UserLoginResponse,
+#     ForgotPasswordResponse,
+#     VerifyOtpResponse,
+#     RefreshTokenResponse,
+#     LogoutResponse,
+#     ResetPasswordResponse,
+#     UserProfileData,
+#     UserProfileResponse,
+# )
+# from app.models.db import UserModelDB
+# from bson import ObjectId
+# from app.core.database import get_database
+# from app.core.logger import get_logger
+# from app.core.auth.hashing import Hash
+# from app.core.auth.password_policy import validate_password
+# from app.core.auth.JWTtoken import (
+#     create_access_token, 
+#     create_refresh_token, 
+#     verify_refresh_token,
+# )
+# from app.core.auth.token_blacklist import add_to_blacklist
+# from app.services.email_service import generate_otp, validate_email, send_otp_email
+# from app.services.admin_service import create_admin
+
+# logger = get_logger(__name__)
+# router = APIRouter(prefix="/api/users", tags=["users"])
+
+
+# # ── Helper Functions ───────────────────────────────────────────
+
+# def detect_identifier_type(identifier: str) -> Literal["email", "phone", "username"]:
+#     email_pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+#     if re.match(email_pattern, identifier):
+#         return "email"
+
+#     phone_pattern = r"^\+?[1-9]\d{1,14}$"
+#     if re.match(phone_pattern, identifier):
+#         return "phone"
+
+#     username_pattern = r"^[a-zA-Z0-9_]{3,30}$"
+#     if re.match(username_pattern, identifier):
+#         return "username"
+
+#     raise ValueError(f"Invalid identifier format: {identifier}")
+
+
+# async def find_user_by_identifier(db, identifier: str):
+#     if len(identifier) == 24 and all(c in "0123456789abcdefABCDEF" for c in identifier):
+#         try:
+#             user = await db.users.find_one({"_id": ObjectId(identifier)})
+#             if user:
+#                 return user
+#         except:
+#             pass
+
+#     try:
+#         identifier_type = detect_identifier_type(identifier)
+#     except ValueError:
+#         return None
+
+#     query_map = {
+#         "email": {"email": identifier},
+#         "phone": {"phone_number": identifier},
+#         "username": {"username": identifier},
+#     }
+
+#     return await db.users.find_one(query_map[identifier_type])
+
+
+# def validate_user_role(role: str) -> str:
+#     if not role:
+#         raise HTTPException(status_code=400, detail="Role is required")
+
+#     normalized = role.strip().lower()
+#     if normalized not in {"user", "admin"}:
+#         raise HTTPException(
+#             status_code=400,
+#             detail=f"Invalid role '{role}'. Allowed: admin, user",
+#         )
+#     return normalized
+
+
+# def validate_account_status(user_doc: dict):
+#     if not user_doc.get("is_active", True):
+#         raise HTTPException(
+#             status_code=403,
+#             detail="Account is disabled. Please contact support.",
+#         )
+
+
+# # ── Routes ─────────────────────────────────────────────────────
+
+# @router.post("/register", response_model=UserProfileData)
+# async def user_register(payload: UserCreateRequest):
+#     try:
+#         db = get_database()
+#         if db is None:
+#             raise HTTPException(status_code=503, detail="Database connection failed")
+
+#         full_name = payload.full_name.strip()
+#         username = payload.username.strip().lower()
+#         email = payload.email.strip().lower()
+#         phone_number = payload.phone_number.strip()
+
+#         existing = await db.users.find_one({
+#             "$or": [
+#                 {"email": email},
+#                 {"phone_number": phone_number},
+#                 {"username": username},
+#             ]
+#         })
+
+#         if existing:
+#             raise HTTPException(status_code=400, detail="User already exists")
+
+#         role_value = payload.role.value if isinstance(payload.role, UserRole) else payload.role
+
+#         validate_password(payload.password)
+#         password_hash = await run_in_threadpool(Hash.bcrypt, payload.password)
+
+#         user = UserModelDB(
+#             full_name=full_name,
+#             username=username,
+#             email=email,
+#             password_hash=password_hash,
+#             phone_number=phone_number,
+#             role=role_value,
+#         )
+
+#         result = await db.users.insert_one(user.dict(by_alias=True, exclude_none=True))
+#         user_id = str(result.inserted_id)
+
+#         # Admin creation
+#         if role_value == "admin":
+#             admin_created = await create_admin(
+#                 db,
+#                 user_id=user_id,
+#                 admin_payload=user.dict()
+#             )
+#             if not admin_created:
+#                 await db.users.delete_one({"_id": result.inserted_id})
+#                 raise HTTPException(status_code=500, detail="Admin creation failed")
+
+#         return UserProfileData(
+#             full_name=user.full_name,
+#             username=user.username,
+#             email=user.email,
+#             phone_number=user.phone_number,
+#             role=user.role,
+#             user_id=user_id,
+#             is_active=True,
+#             last_login=None,
+#         )
+
+#     except Exception as e:
+#         logger.error(f"register_failed: {e}", exc_info=True)
+#         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# # ─────────────────────────────────────────────
+
+# @router.post("/login", response_model=UserLoginResponse)
+# async def user_login(payload: UserLoginRequest):
+#     try:
+#         db = get_database()
+
+#         user_doc = await find_user_by_identifier(db, payload.username)
+#         if not user_doc:
+#             raise HTTPException(status_code=401, detail="Invalid credentials")
+
+#         if not await run_in_threadpool(Hash.verify, user_doc["password_hash"], payload.password):
+#             raise HTTPException(status_code=401, detail="Invalid credentials")
+
+#         validate_account_status(user_doc)
+
+#         user_id_str = str(user_doc["_id"])
+#         token_subject = user_doc.get("email") or user_doc.get("username") or user_id_str
+
+#         access_token = create_access_token({
+#             "sub": token_subject,
+#             "role": user_doc.get("role"),
+#             "user_id": user_id_str
+#         })
+
+#         refresh_token = create_refresh_token({
+#             "sub": token_subject,
+#             "user_id": user_id_str
+#         })
+
+#         return UserLoginResponse(
+#             status="success",
+#             message="Login successful",
+#             user=UserProfileData(
+#                 full_name=user_doc.get("full_name"),
+#                 username=user_doc.get("username"),
+#                 email=user_doc.get("email"),
+#                 phone_number=user_doc.get("phone_number"),
+#                 role=user_doc.get("role"),
+#                 user_id=user_id_str,
+#                 is_active=True,
+#                 last_login=user_doc.get("last_login"),
+#             ),
+#             access_token=access_token,
+#             refresh_token=refresh_token,
+#         )
+
+#     except Exception as e:
+#         logger.error(f"login_failed: {e}", exc_info=True)
+#         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# # ─────────────────────────────────────────────
+
+# @router.post("/forgot-password", response_model=ForgotPasswordResponse)
+# async def forgot_password(payload: ForgotPasswordRequest):
+#     db = get_database()
+
+#     user_doc = await db.users.find_one({"email": payload.email})
+#     if not user_doc:
+#         raise HTTPException(status_code=404, detail="User not found")
+
+#     otp = generate_otp()
+#     expires_at = datetime.utcnow() + timedelta(minutes=30)
+
+#     await db.users.update_one(
+#         {"_id": user_doc["_id"]},
+#         {"$set": {"password_reset_token": otp, "password_reset_expires": expires_at}}
+#     )
+
+#     await send_otp_email(payload.email, otp)
+
+#     return ForgotPasswordResponse(
+#         status="success",
+#         message="OTP sent"
+#     )
+
+
+# # ─────────────────────────────────────────────
+
+# @router.post("/verify-otp", response_model=VerifyOtpResponse)
+# async def verify_otp(payload: VerifyOtpRequest):
+#     db = get_database()
+
+#     user_doc = await db.users.find_one({"email": payload.email})
+
+#     if user_doc["password_reset_token"] != payload.otp:
+#         raise HTTPException(status_code=401, detail="Invalid OTP")
+
+#     await db.users.update_one(
+#         {"_id": user_doc["_id"]},
+#         {"$set": {"is_otp_verified": True}}
+#     )
+
+#     return VerifyOtpResponse(status="success", message="OTP verified")
+
+
+# # ─────────────────────────────────────────────
+
+# @router.post("/reset-password", response_model=ResetPasswordResponse)
+# async def reset_password(payload: ResetPasswordRequest):
+#     db = get_database()
+
+#     user_doc = await db.users.find_one({"email": payload.email})
+
+#     if not user_doc.get("is_otp_verified"):
+#         raise HTTPException(status_code=403, detail="OTP not verified")
+
+#     validate_password(payload.new_password)
+#     new_password_hash = await run_in_threadpool(Hash.bcrypt, payload.new_password)
+
+#     await db.users.update_one(
+#         {"_id": user_doc["_id"]},
+#         {"$set": {"password_hash": new_password_hash, "is_otp_verified": False}}
+#     )
+
+#     return ResetPasswordResponse(
+#         status="success",
+#         message="Password reset successful"
+#     )
+
+
+# # ─────────────────────────────────────────────
+
+# @router.post("/refresh", response_model=RefreshTokenResponse)
+# async def refresh_token(payload: RefreshTokenRequest):
+#     credentials_exception = HTTPException(status_code=401, detail="Invalid refresh token")
+
+#     token_data = await run_in_threadpool(
+#         verify_refresh_token,
+#         payload.refresh_token,
+#         credentials_exception
+#     )
+
+#     db = get_database()
+#     user_doc = await find_user_by_identifier(db, token_data.sub)
+
+#     user_id_str = str(user_doc["_id"])
+#     token_subject = user_doc.get("email") or user_doc.get("username") or user_id_str
+
+#     access_token = create_access_token({
+#         "sub": token_subject,
+#         "role": user_doc.get("role"),
+#         "user_id": user_id_str
+#     })
+
+#     return RefreshTokenResponse(status="success", access_token=access_token)
+
+
+# # ─────────────────────────────────────────────
+
+# @router.post("/logout", response_model=LogoutResponse)
+# async def user_logout(current=Depends(get_current_user)):
+#     token = current["token"]
+
+#     await run_in_threadpool(add_to_blacklist, token)
+
+#     return LogoutResponse(
+#         status="success",
+#         message="Logout successful"
+#     )

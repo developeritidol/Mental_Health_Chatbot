@@ -81,11 +81,12 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
     existing = await db.sessions.find_one({"user_id": user_id}, sort=[("created_at", -1)])
     if existing:
         session_id = existing.get("session_id")
+        first_name_wb = (profile_dict.get("first_name") or "").strip() or "there"
         logger.info(f"Reusing existing session {session_id} for user {user_id}")
         return AssessmentResponse(
             status="success",
             session_id=session_id,
-            opening_message="Welcome back! How are you feeling today?",
+            opening_message=f"Hey {first_name_wb}, welcome back. How are you feeling today?",
             timestamp=datetime.now(timezone.utc),
             user_id=user_id,
         )
@@ -107,8 +108,11 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
         raise HTTPException(status_code=500, detail="Failed to create session")
 
     # 4. Generate opening message
+    first_name = (profile_dict.get("first_name") or "").strip() or "Friend"
+    last_name  = (profile_dict.get("last_name") or "").strip()
     llm_profile = {
-        "name": f"{profile_dict.get('first_name', 'Friend')} {profile_dict.get('last_name', '')}".strip() or "Friend",
+        "first_name": first_name,
+        "name": f"{first_name} {last_name}".strip() or first_name,
         "gender": profile_dict.get("gender", ""),
         "age": profile_dict.get("age"),
         "personality_summary": personality_summary,

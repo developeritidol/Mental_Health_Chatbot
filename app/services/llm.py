@@ -82,20 +82,21 @@ def _build_emotion_arc(history: list[dict]) -> str:
 
 
 def _build_personalization_note(
-    name: str, age: int, turn_count: int, history: list[dict]
+    first_name: str, age: int, turn_count: int, history: list[dict]
 ) -> str:
-    """ 
+    """
     Builds personalization context that deepens with turns.
+    Uses first_name only (US-style) for natural, warm address.
     """
     if turn_count == 0:
         parts = []
         if age > 0:
             parts.append(f"age {age}")
-        return (f"{name}, " + ", ".join(parts) + ".") if parts else ""
+        return (f"{first_name}, " + ", ".join(parts) + ".") if parts else ""
 
     if turn_count <= 2:
         return (
-            f"You've just started talking with {name}. "
+            f"You've just started talking with {first_name}. "
             "You don't know much yet — be curious, not assumptive."
         )
 
@@ -107,7 +108,7 @@ def _build_personalization_note(
     if turn_count <= 5:
         shared = (" | ".join(user_msgs[-3:]))[:250] if user_msgs else ""
         return (
-            f"You know {name} somewhat now. "
+            f"You know {first_name} somewhat now. "
             f"They've shared: {shared}. "
             "Reference what they told you. Be specific, not generic."
         )
@@ -115,7 +116,7 @@ def _build_personalization_note(
     # Turn 6+: deep personalization
     all_shared = (" | ".join(user_msgs[-6:]))[:400] if user_msgs else ""
     return (
-        f"You know {name} well by now. "
+        f"You know {first_name} well by now. "
         f"Here's what they've shared over the conversation: {all_shared}. "
         "Use this to be specific and personal. Reference things they told you earlier."
     )
@@ -139,7 +140,10 @@ def build_system_prompt(
     conversation_so_far = conversation_so_far or []
 
     # ── Profile ───────────────────────────────────────────────────────────────
-    name          = profile.get("name", "this person").strip("'\"\ ")
+    full_name     = profile.get("name", "Friend").strip("'\"\ ") or "Friend"
+    # Use first name only for warm, US-style direct address throughout the conversation
+    first_name    = profile.get("first_name") or full_name.split()[0]
+    first_name    = first_name.strip("'\"\ ") or "Friend"
     country       = profile.get("country", "IN")
     gender        = profile.get("gender", "")
     personality   = profile.get("personality_summary", "Not provided")
@@ -261,7 +265,7 @@ def build_system_prompt(
 
     # ── Personalization ───────────────────────────────────────────────────────
     personalization = _build_personalization_note(
-        name, age, turn_count, conversation_so_far
+        first_name, age, turn_count, conversation_so_far
     )
 
     # ── Emotion arc ───────────────────────────────────────────────────────────
@@ -279,7 +283,7 @@ def build_system_prompt(
     if long_term_memory:
         formatted = "\n".join(f"  - {m}" for m in long_term_memory)
         memory_section = (
-            f"\nRelevant moments from past conversations with {name}:\n{formatted}\n"
+            f"\nRelevant moments from past conversations with {first_name}:\n{formatted}\n"
             f"Use this only if it naturally connects to what they're saying now. Don't force it.\n"
         )
 
@@ -307,7 +311,8 @@ You never use therapy-speak or motivational poster language. No "You're not alon
 
 {anti_rep}
 
-You are talking with {name}. {f"Gender: {gender}. " if gender else ""}{f"Age: {age}. " if age > 0 else ""}Their personality: {personality}. This is turn {turn_count + 1}.
+You are talking with {first_name}. {f"Gender: {gender}. " if gender else ""}{f"Age: {age}. " if age > 0 else ""}Their personality: {personality}. This is turn {turn_count + 1}.
+Use their first name naturally and sparingly — the way a real friend would, not every message.
 
 {personalization}
 {emotion_arc_section}
@@ -326,15 +331,19 @@ Their current emotional state: {llm_sent} ({cat}, {intensity} intensity). Recomm
 async def get_opening_message(profile: dict) -> str:
     """
     Generates the first message after onboarding.
-    Warm, human, personality-aware. No topic or mood — the AI discovers
-    what's on the user's mind through natural conversation.
+    Warm, human, personality-aware. Greets user by first name (US-style).
+    No topic or mood assumption — the AI discovers what's on the user's mind.
     """
     client = _get_client()
 
-    name       = profile.get("name", "Friend")
+    full_name   = profile.get("name", "Friend") or "Friend"
+    # Extract first name for US-style personalized greeting (e.g. "Hey Sarah,")
+    first_name  = profile.get("first_name") or full_name.split()[0]
+    first_name  = first_name.strip("'\"\  ") or "Friend"
+
     personality = profile.get("personality_summary", "")
-    age        = _safe_int(profile.get("age"))
-    gender     = profile.get("gender", "")
+    age         = _safe_int(profile.get("age"))
+    gender      = profile.get("gender", "")
 
     # Age-appropriate tone
     tone = "warm and human"
@@ -346,22 +355,26 @@ async def get_opening_message(profile: dict) -> str:
     personality_context = f"Their personality: {personality}." if personality else ""
 
     minimal_system = (
-        f"You are MindBridge, a warm mental health companion meeting {name} for the first time. "
+        f"You are MindBridge, a warm mental health companion meeting {first_name} for the first time. "
         f"Tone: {tone}. {personality_context} "
         "You are NOT a therapist. You are the kind of friend who makes people feel safe. "
         "Write naturally. Be genuine, not generic."
     )
 
     user_prompt = (
-        f"Write a warm opening message for {name} (2-3 sentences).\n"
-        "Welcome them genuinely. Let them know this is a safe space to talk about whatever is on their mind. "
+        f"Write a warm, personalized opening message for {first_name} (2-3 sentences).\n"
+        f"Start naturally with their first name — the way a real friend would greet someone. "
+        f"For example: 'Hey {first_name}, ...' or '{first_name}, good to meet you.' "
+        "Use whichever opening feels most natural and warm, not scripted.\n"
+        "After the greeting, let them know this is a safe space to talk about whatever is on their mind. "
         "Gently invite them to share what brought them here — but don't pressure.\n\n"
         "Rules:\n"
         "- CRITICAL: Write strictly in English only.\n"
         "- COMPLETE sentences only. Never cut off mid-sentence.\n"
         "- Do not say: 'I\'m here for you' / 'brave step' / 'you deserve' / "
         "'reach out whenever' / 'I understand' / 'It sounds like'\n"
-        "- Do not start with their name or with 'I'\n"
+        f"- You MUST use {first_name}'s name naturally at the start\n"
+        "- Do not start with 'I'\n"
         "- No sign-offs, no lists, no clinical terms"
     )
 
@@ -380,13 +393,13 @@ async def get_opening_message(profile: dict) -> str:
         reply = response.choices[0].message.content.strip()
         if not reply:
             raise ValueError("Empty response from model")
-        logger.info(f"Opening message generated ({len(reply)} chars)")
+        logger.info(f"Opening message generated for {first_name} ({len(reply)} chars)")
         return reply
     except Exception as e:
         logger.error(f"Opening message error: {e}")
         return (
-            f"Whatever brought you here today — this space doesn't require "
-            f"you to have it figured out. Start wherever feels right, {name}."
+            f"Hey {first_name}, glad you're here. This is a safe space — no pressure, "
+            f"no judgment. Whenever you're ready, just start talking."
         )
 
 

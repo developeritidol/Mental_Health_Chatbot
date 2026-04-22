@@ -90,9 +90,8 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
             detail="Profile not found. Complete assessment first.",
         )
 
-    # Resolve active session if needed for backwards compat
-    session_info = await get_existing_session(req.user_id)
-    actual_session_id = session_info["session_id"] if session_info else req.user_id
+    # Use the session_id provided by the client
+    actual_session_id = req.session_id
 
     # 1b. Guard: If this session is currently escalated to a human,
     #     block AI and redirect Android back to the WebSocket.

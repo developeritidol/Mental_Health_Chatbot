@@ -1,7 +1,6 @@
 from fastapi import Depends, HTTPException, status, Header, Security
 from fastapi.security import HTTPBearer
 
-
 from app.core.auth.JWTtoken import verify_token
 from app.core.auth.token_blacklist import is_blacklisted
 
@@ -16,7 +15,7 @@ security = HTTPBearer()
 async def get_current_user(credentials = Security(security)):
     token = credentials.credentials
 
-    # 1. Strip "Bearer " if Swagger accidentally doubled it
+    # 1. Strip "Bearer " if Swagger acciden tally doubled it
     if token.startswith("Bearer "):
         token = token.split(" ")[1]
 

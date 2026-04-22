@@ -74,6 +74,7 @@ class ForgotPasswordRequest(BaseModel):
 class StreamChatRequest(BaseModel):
     """POST /api/chat/stream — every chat message from Android."""
     user_id: str = Field(..., min_length=1)
+    session_id: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1, max_length=2000)
 
 class VerifyOtpRequest(BaseModel):

@@ -1,25 +1,22 @@
-from fastapi import Depends, HTTPException, status, Header, Security
-from fastapi.security import HTTPBearer
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from app.core.logger import get_logger
 
 from app.core.auth.JWTtoken import verify_token
-from app.core.auth.token_blacklist import is_blacklisted
 
-def get_token(authorization: str = Header(None)):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid token")
+logger = get_logger(__name__)
 
-    return authorization.split(" ")[1]
+token_auth_scheme = HTTPBearer()
 
-security = HTTPBearer()
 
-async def get_current_user(credentials = Security(security)):
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(token_auth_scheme)):
     token = credentials.credentials
 
-    # 1. Strip "Bearer " if Swagger acciden tally doubled it
+    # Fix Swagger double "Bearer Bearer"
     if token.startswith("Bearer "):
         token = token.split(" ")[1]
 
-    print("CLEAN TOKEN RECEIVED:", token)
+    logger.debug(f"Token received for validation: {token[:20]}...")
 
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -27,17 +24,17 @@ async def get_current_user(credentials = Security(security)):
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-    # 2. Single source of truth for decoding and checking blacklist
-    # (This uses the verify_token function imported from JWTtoken.py)
+    # Decode + validate token
     token_data = verify_token(token, credentials_exception)
 
-    # 3. Create a stateless user object directly from the token data!
+    # ✅ FIXED: use user_id as primary key
     user_doc = {
-        "_id": token_data.user_id,         
-        "user_id": token_data.user_id,     
-        "email": token_data.useremail,     
-        "useremail": token_data.useremail
+        "_id": token_data.user_id,
+        "user_id": token_data.user_id,
+        "email": token_data.email,
+        # "useremail": token_data.email,  # optional (keep if your code expects it)
+        "role": token_data.role,
+        "token": token  # IMPORTANT for logout
     }
 
-    # 4. Return the dictionary so chat.py gets the user_id instantly
     return user_doc

@@ -1,108 +1,159 @@
-import os
 from datetime import datetime, timedelta
 from jose import JWTError, jwt, ExpiredSignatureError
-from app.api.schemas.response import TokenData
-from app.core.config import get_settings
-from app.core.auth.token_blacklist import is_blacklisted
 from fastapi import HTTPException
 
+from app.api.schemas.response import TokenData
+from app.core.config import get_settings
+from app.core.auth.token_blacklist import is_token_blacklisted
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────
+# Create Tokens
+# ─────────────────────────────────────────────────────────────
 
 def create_access_token(data: dict):
     settings = get_settings()
+
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire, "type": "access"})
+    expire = datetime.utcnow() + timedelta(
+        minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
+    )
+
+    to_encode.update({
+        "exp": expire,
+        "type": "access"
+    })
+
     encoded_jwt = jwt.encode(
         to_encode,
         settings.SECRET_KEY,
         algorithm=settings.ALGORITHM,
     )
+
     return encoded_jwt
 
 
 def create_refresh_token(data: dict):
-    """Create a refresh token with longer expiry"""
     settings = get_settings()
-    to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
-    to_encode.update({"exp": expire, "type": "refresh"})
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(
+        days=settings.REFRESH_TOKEN_EXPIRE_DAYS
+    )
+
+    to_encode.update({
+        "exp": expire,
+        "type": "refresh"
+    })
+
     encoded_jwt = jwt.encode(
         to_encode,
         settings.SECRET_KEY,
         algorithm=settings.ALGORITHM,
     )
+
     return encoded_jwt
 
 
+# ─────────────────────────────────────────────────────────────
+# Verify Refresh Token
+# ─────────────────────────────────────────────────────────────
+
 def verify_refresh_token(token: str, credentials_exception):
-    """Verify refresh token specifically"""
     settings = get_settings()
-    
-    # Check if token is blacklisted
-    if is_blacklisted(token):
-        raise HTTPException(
-            status_code=401,
-            detail="Refresh token has been revoked. Please login again.",
-        )
-    
+
+    # Blacklist check
+    if is_token_blacklisted(token):
+        logger.warning("event=refresh_token_rejected reason=blacklisted")
+        raise HTTPException(status_code=401, detail="Token is blacklisted")
+
     try:
         payload = jwt.decode(
             token,
             settings.SECRET_KEY,
             algorithms=[settings.ALGORITHM]
         )
-        useremail: str = payload.get("sub")
-        user_id: str = payload.get("user_id")
-        token_type: str = payload.get("type")
 
-        if useremail is None or token_type != "refresh":
+        useremail = payload.get("sub")
+        user_id = payload.get("user_id")
+        token_type = payload.get("type")
+        role = payload.get("role")
+
+        if user_id is None or token_type != "refresh":
+            logger.warning("event=refresh_token_rejected reason=invalid_claims")
             raise credentials_exception
 
-        token_data = TokenData(useremail=useremail, user_id=user_id)
+        token_data = TokenData(
+            user_id=user_id,
+            email=useremail,
+            role=role
+        )
+
         return token_data
+
     except ExpiredSignatureError:
-        # Return 403 for expired refresh token so frontend knows to logout
+        logger.warning("event=refresh_token_rejected reason=expired")
         raise HTTPException(
             status_code=403,
             detail="Refresh token expired! Please login again.",
         )
+
     except JWTError:
+        logger.warning("event=refresh_token_rejected reason=decode_error")
         raise credentials_exception
 
 
+# ─────────────────────────────────────────────────────────────
+# Verify Access Token
+# ─────────────────────────────────────────────────────────────
+
 def verify_token(token: str, credentials_exception):
     settings = get_settings()
-    
-    # Check if token is blacklisted
-    if is_blacklisted(token):
+
+    # Blacklist check
+    if is_token_blacklisted(token):
+        logger.warning("event=access_token_rejected reason=blacklisted")
         raise HTTPException(
             status_code=401,
             detail="Token has been revoked. Please login again.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     try:
         payload = jwt.decode(
             token,
             settings.SECRET_KEY,
             algorithms=[settings.ALGORITHM]
         )
-        useremail: str = payload.get("sub")
-        user_id: str = payload.get("user_id")
-        token_type: str = payload.get("type")
 
-        if useremail is None or token_type != "access":
+        user_id = payload.get("user_id")
+        email = payload.get("sub")
+        token_type = payload.get("type")
+        role = payload.get("role")
+
+        if user_id is None or token_type != "access":
+            logger.warning("event=access_token_rejected reason=invalid_claims")
             raise credentials_exception
 
-        token_data = TokenData(useremail=useremail, user_id=user_id)
+        token_data = TokenData(
+            user_id=user_id,
+            email=email,
+            role=role
+        )
+
         return token_data
+
     except ExpiredSignatureError:
-        # Handle expired token specifically
+        logger.warning("event=access_token_rejected reason=expired")
         raise HTTPException(
             status_code=401,
             detail="Token expired! Please login again.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
     except JWTError:
+        logger.warning("event=access_token_rejected reason=decode_error")
         raise credentials_exception

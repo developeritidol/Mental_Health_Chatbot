@@ -3,7 +3,7 @@ from typing import Optional
 from datetime import datetime
 
 
-# ── Assessment response ───────────────────────────────────────────────────────
+# ── Assessment response ───────────────────────────────────────
 
 class AssessmentResponse(BaseModel):
     status: str
@@ -13,7 +13,7 @@ class AssessmentResponse(BaseModel):
     user_id: str
 
 
-# ── Chat stream metadata (sent as final SSE event) ───────────────────────────
+# ── Chat stream metadata ──────────────────────────────────────
 
 class EmotionData(BaseModel):
     dominant_emotion: str
@@ -25,7 +25,7 @@ class EmotionData(BaseModel):
     sadness_scores: list[float] = []
 
 
-# ── Chat history API ─────────────────────────────────────────────────────────
+# ── Chat history API ──────────────────────────────────────────
 
 class ChatMessageResponse(BaseModel):
     user_id: str
@@ -41,7 +41,7 @@ class ChatHistoryResponse(BaseModel):
     messages: list[ChatMessageResponse]
 
 
-# ── Session list API ─────────────────────────────────────────────────────────
+# ── Session list API ──────────────────────────────────────────
 
 class SessionResponse(BaseModel):
     session_id: str
@@ -59,7 +59,7 @@ class SessionListResponse(BaseModel):
     sessions: list[SessionResponse]
 
 
-# ── Human intervention API ───────────────────────────────────────────────────
+# ── Human intervention API ────────────────────────────────────
 
 class EscalatedSessionResponse(BaseModel):
     session_id: str
@@ -78,7 +78,7 @@ class EscalatedSessionListResponse(BaseModel):
     sessions: list[EscalatedSessionResponse]
 
 
-# ── Health / utility ──────────────────────────────────────────────────────────
+# ── Health / utility ──────────────────────────────────────────
 
 class TranscriptionResponse(BaseModel):
     text: str
@@ -86,12 +86,59 @@ class TranscriptionResponse(BaseModel):
     duration: Optional[float] = None
 
 
-# ── Admin / User API responses ─────────────────────────────────────────────────
+# ── Token / Auth ──────────────────────────────────────────────
 
 class TokenData(BaseModel):
-    useremail: str
-    user_id: Optional[str] = None
+    user_id: str
+    email: str
+    role: Optional[str] = None
 
+
+# ── User Profile ──────────────────────────────────────────────
+
+class UserProfileData(BaseModel):
+    full_name: str
+    username: str
+    email: str
+    phone_number: str
+    role: str
+    professional_role: Optional[str] = None
+    license_number: Optional[str] = None
+    state_of_licensure: Optional[str] = None
+    npi_number: Optional[str] = None
+    practice_type: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    consultation_mode: Optional[str] = None
+    user_id: Optional[str] = None
+    is_active: bool = True
+    last_login: Optional[datetime] = None
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "full_name": "John Doe",
+                "username": "john_doe",
+                "email": "john@example.com",
+                "phone_number": "+911234567890",
+                "role": "user",
+                "professional_role": None,
+                "license_number": None,
+                "state_of_licensure": None,
+                "npi_number": None,
+                "practice_type": None,
+                "city": None,
+                "state": None,
+                "consultation_mode": None,
+                "user_id": "user_12345",
+                "is_active": True,
+                "last_login": None
+            }
+        }
+    }
+
+
+# ── Auth Responses ────────────────────────────────────────────
 
 class UserSignupResponse(BaseModel):
     status: str
@@ -102,7 +149,7 @@ class UserSignupResponse(BaseModel):
 class UserLoginResponse(BaseModel):
     status: str
     message: str
-    user: dict  # simplified user data without password
+    user: UserProfileData
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
@@ -132,3 +179,8 @@ class RefreshTokenResponse(BaseModel):
 class LogoutResponse(BaseModel):
     status: str
     message: str
+
+
+class UserProfileResponse(BaseModel):
+    status: str
+    user: UserProfileData

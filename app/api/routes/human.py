@@ -168,6 +168,13 @@ async def close_escalated_session(user_id: str, current_provider = Depends(get_c
     # Cancel any pending counselor fallback timeouts since the session is closed
     manager.cancel_timeout_task(user_id)
 
+    # Clear user from ConnectionManager memory
+    if user_id in manager.rooms:
+        del manager.rooms[user_id]
+    if user_id in manager.has_human:
+        del manager.has_human[user_id]
+    logger.info(f"[MEMORY CLEANUP] Cleared user {user_id} from ConnectionManager memory")
+
     # Notify everyone in the WebSocket room that the session is ending
     close_notice = {
         "role": "system",

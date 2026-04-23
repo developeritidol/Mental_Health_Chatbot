@@ -2,7 +2,7 @@
 Assessment Route
 ────────────────
 POST /api/assessment — One-time onboarding from Android.
-Saves profile + personality, creates session, returns opening message.
+Saves personality, creates session, returns opening message.
 If the user already has a session, returns the existing session_id.
 """
 
@@ -27,7 +27,7 @@ router = APIRouter(prefix="/api/assessment", tags=["assessment"])
 async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_current_user)):
     """
     Called when a user completes onboarding in Android.
-    1. Saves/updates profile + personality to DB
+    1. Saves/updates personality to DB
     2. Checks if a session already exists for this user
        - If YES: returns the existing session_id (no new session created)
        - If NO:  creates a new session + generates opening message
@@ -43,39 +43,16 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed")
 
-    # 1. Save/update profile + personality
-    profile_dict = req.profile.model_dump()
+    # 1. Save/update personality only
     personality_dict = req.personality_answers.model_dump()
-
-
     personality_summary = build_personality_summary(personality_dict)
 
     update_doc = {
         "user_id": user_id,
-        "first_name": profile_dict.get("first_name", ""),
-        "last_name": profile_dict.get("last_name"),
-        "username": profile_dict.get("username"),
-        "gender": profile_dict.get("gender"),
-        "age": profile_dict.get("age"),
-        "emergency_contact": {
-            "name": profile_dict.get("emergency_contact_name"),
-            "relation": profile_dict.get("emergency_contact_relation"),
-            "phone": profile_dict.get("emergency_contact_phone"),
-        },
         "personality_answers": personality_dict,
         "personality_summary": personality_summary,
         "last_active": datetime.now(timezone.utc),
     }
-
-    try:
-        await db.users.update_one(
-            {"user_id": user_id},
-            {"$set": update_doc, "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
-            upsert=True,
-        )
-    except Exception as e:
-        logger.error(f"Failed to upsert user profile: {e}")
-        raise HTTPException(status_code=500, detail="Failed to save profile")
 
     # 2. Check if this user already has a session
     existing = await db.sessions.find_one({"user_id": user_id}, sort=[("created_at", -1)])
@@ -108,9 +85,7 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
 
     # 4. Generate opening message
     llm_profile = {
-        "name": f"{profile_dict.get('first_name', 'Friend')} {profile_dict.get('last_name', '')}".strip() or "Friend",
-        "gender": profile_dict.get("gender", ""),
-        "age": profile_dict.get("age"),
+        "name": "Friend",  # Default name since personal info is filtered
         "personality_summary": personality_summary,
         "country": "IN",
     }

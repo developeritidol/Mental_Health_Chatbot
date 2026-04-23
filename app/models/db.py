@@ -20,10 +20,11 @@ class UserModelDB(BaseModel):
 
     # ── Authentication / admin fields ─────────────────────────────────────────
     full_name: Optional[str] = None
-    username: Optional[str] = None
     email: Optional[str] = None
     password_hash: Optional[str] = None
     phone_number: Optional[str] = None
+    is_user: bool = True
+    is_admin: bool = False
     professional_role: Optional[str] = None  # e.g., "Licensed Psychologist (PhD / PsyD)"
     license_number: Optional[str] = None
     state_of_licensure: Optional[str] = None
@@ -32,7 +33,6 @@ class UserModelDB(BaseModel):
     city: Optional[str] = None
     state: Optional[str] = None
     consultation_mode: Optional[str] = None  # e.g., "In-person"
-    role: str = "user"
     is_active: bool = True  # Account status: True=active, False=disabled/suspended
     last_login: Optional[datetime] = None
     password_reset_token: Optional[str] = None

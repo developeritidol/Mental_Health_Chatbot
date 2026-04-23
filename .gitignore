@@ -4,6 +4,7 @@ logs/
 # Environment
 .env
 .venv/
+.env.production
 
 # Python
 __pycache__/

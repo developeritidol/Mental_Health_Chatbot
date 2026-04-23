@@ -239,6 +239,8 @@ class ConnectionManager:
             if not self.rooms[user_id]:
                 del self.rooms[user_id]
                 self.has_human.pop(user_id, None)
+                # Clean up timeout task to prevent memory leak
+                self.cancel_timeout_task(user_id)
         logger.info(f"[WS] Connection closed from room '{user_id}'.")
 
     async def broadcast(self, user_id: str, payload: dict, sender_ws: WebSocket):
@@ -329,7 +331,7 @@ async def _counselor_timeout_watchdog(user_id: str):
     from app.core.database import get_database
     db = get_database()
     actual_session_id = user_id
-    if db:
+    if db is not None:
         session_info = await db.sessions.find_one({"user_id": user_id}, sort=[("created_at", -1)])
         if session_info:
             actual_session_id = session_info["session_id"]
@@ -341,7 +343,7 @@ async def _counselor_timeout_watchdog(user_id: str):
         "user_id": user_id,
     })
 
-    if db:
+    if db is not None:
         await db.sessions.update_many(
             {"user_id": user_id, "is_escalated": True},
             {"$set": {"is_escalated": False, "escalation_closed_at": datetime.now(timezone.utc)}}
@@ -376,7 +378,7 @@ async def inactivity_watchdog():
                 
                 from app.core.database import get_database
                 db = get_database()
-                if db:
+                if db is not None:
                     await db.sessions.update_one(
                         {"session_id": session_id},
                         {"$set": {"is_escalated": False, "escalation_closed_at": datetime.now(timezone.utc)}}
@@ -429,23 +431,37 @@ async def dashboard_notifications_ws(websocket: WebSocket):
 
 
 @router.websocket("/chat/{user_id}")
-async def human_chat_ws(websocket: WebSocket, user_id: str, token: str):
+async def human_chat_ws(websocket: WebSocket, user_id: str):
     """
     Real-time human handoff endpoint.
 
+    Headers required:
+      Authorization: Bearer <token>
+    
     Query params accepted (optional):
       ?role=user            → for the Android user
       ?role=human_counselor → for the admin dashboard
       ?counselor_name=...   → custom name shown in Android UI
     """
-    # 1. Define the exception for invalid tokens
+    # 1. Extract token from Authorization header
+    auth_header = websocket.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    
+    token = auth_header.split(" ")[1].strip()
+    if not token:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    # 2. Define the exception for invalid tokens
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-    # 2. Verify the token BEFORE accepting the websocket connection
+    # 3. Verify the token BEFORE accepting the websocket connection
     try:
         token_data = verify_token(token, credentials_exception)
     except HTTPException:
@@ -453,10 +469,17 @@ async def human_chat_ws(websocket: WebSocket, user_id: str, token: str):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
+    # 4. Security: Ensure authenticated user matches the user_id in URL
+    authenticated_user_id = token_data.user_id
+    if authenticated_user_id != user_id and role == "user":
+        logger.warning(f"[WS SECURITY] User {authenticated_user_id} attempting to access WebSocket for user {user_id}")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     role = websocket.query_params.get("role", "user")
     counselor_name = websocket.query_params.get("counselor_name", "Crisis Support Team")
 
-    # 1. Reject users if the device is not currently escalated
+    # 5. Reject users if the device is not currently escalated
     if role == "user":
         from app.core.database import get_database
         db = get_database()

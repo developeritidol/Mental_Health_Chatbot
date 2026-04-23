@@ -119,19 +119,11 @@ async def upsert_user_profile(user_id: str, profile: dict, personality_answers: 
     personality_summary = build_personality_summary(personality_answers)
 
     update_doc = {
-        "first_name": profile.get("first_name", ""),
-        "last_name": profile.get("last_name"),
-        "username": profile.get("username"),
-        "gender": profile.get("gender"),
-        "age": profile.get("age"),
-        "emergency_contact": {
-            "name": profile.get("emergency_contact_name"),
-            "relation": profile.get("emergency_contact_relation"),
-            "phone": profile.get("emergency_contact_phone"),
-        },
         "personality_answers": personality_answers,
         "personality_summary": personality_summary,
         "last_active": datetime.now(timezone.utc),
+        # Include only the filtered profile fields
+        **profile
     }
 
     try:
@@ -161,12 +153,9 @@ async def get_user_profile(user_id: str) -> Optional[dict]:
             return None
 
         # Build the profile dict that the LLM service expects
-        ec = doc.get("emergency_contact", {}) or {}
         return {
             "user_id": user_id,
-            "name": f"{doc.get('first_name', 'Friend')} {doc.get('last_name', '')}".strip() or "Friend",
-            "gender": doc.get("gender", ""),
-            "age": doc.get("age"),
+            "name": "Friend",  # Default name since personal info is filtered
             "personality_summary": doc.get("personality_summary", "Not provided"),
             "existing_conditions": "None",
             "country": "IN",
@@ -566,13 +555,6 @@ async def get_escalated_sessions() -> List[Dict]:
                             "else": None
                         }
                     },
-                    "username": {
-                        "$cond": {
-                            "if": {"$gt": [{"$size": "$user_info"}, 0]},
-                            "then": {"$arrayElemAt": ["$user_info.username", 0]},
-                            "else": None
-                        }
-                    }
                 }
             },
             {
@@ -592,7 +574,6 @@ async def get_escalated_sessions() -> List[Dict]:
                 "user_id": doc.get("user_id"),
                 "first_name": doc.get("first_name", "Unknown"),
                 "last_name": doc.get("last_name"),
-                "username": doc.get("username"),
                 "is_escalated": doc.get("is_escalated", False),
                 "escalated_at": doc.get("escalated_at").replace(tzinfo=timezone.utc).isoformat() if doc.get("escalated_at") else None,
                 "created_at": doc.get("created_at").replace(tzinfo=timezone.utc).isoformat() if doc.get("created_at") else None,

@@ -20,5 +20,5 @@ build/
 *.swp
 *.swo
 venv/
-
+.postman/
 Md files/

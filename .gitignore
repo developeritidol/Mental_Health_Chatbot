@@ -4,6 +4,7 @@ logs/
 # Environment
 .env
 .venv/
+.env.production
 
 # Python
 __pycache__/
@@ -19,5 +20,5 @@ build/
 *.swp
 *.swo
 venv/
-
+.postman/
 Md files/

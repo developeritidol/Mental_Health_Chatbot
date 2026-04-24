@@ -147,19 +147,19 @@ async def get_user_profile(user_id: str) -> Optional[dict]:
         return None
 
     try:
-        doc = await db.users.find_one({"user_id": user_id})
-        if not doc:
-            logger.warning(f"No profile found for user {user_id}")
-            return None
+        from bson import ObjectId
 
-        # Build the profile dict that the LLM service expects
+        query = [{"user_id": user_id}]
+        if ObjectId.is_valid(user_id):
+            query.append({"_id": ObjectId(user_id)})
+
+        doc = await db.users.find_one({"$or": query})
+
         return {
             "user_id": user_id,
-            "name": "Friend",  # Default name since personal info is filtered
-            "personality_summary": doc.get("personality_summary", "Not provided"),
-            "existing_conditions": "None",
-            "country": "IN",
-            "crisis_follow_up": False,
+            "name": doc.get("full_name", "Friend") if doc else "Friend",
+            "personality_summary": doc.get("personality_summary", "Not provided") if doc else "Not provided",
+            "country": "IN"
         }
     except Exception as e:
         logger.error(f"Failed to get profile for {user_id}: {e}")

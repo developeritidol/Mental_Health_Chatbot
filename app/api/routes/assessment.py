@@ -54,6 +54,17 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
         "last_active": datetime.now(timezone.utc),
     }
 
+    from bson import ObjectId
+
+    query = [{"user_id": user_id}]
+    if ObjectId.is_valid(user_id):
+        query.append({"_id": ObjectId(user_id)})
+
+    await db.users.update_one(
+        {"$or": query},
+        {"$set": update_doc}
+    )
+
     # 2. Check if this user already has a session
     existing = await db.sessions.find_one({"user_id": user_id}, sort=[("created_at", -1)])
     if existing:

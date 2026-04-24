@@ -85,11 +85,8 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
  
     # 1. Load profile from DB
     profile = await get_user_profile(user_id)
-    if not profile:
-        raise HTTPException(
-            status_code=404,
-            detail="Profile not found. Complete assessment first.",
-        )
+    print("USER_ID:", user_id)
+    print("PROFILE:", profile)
  
     # Use the session_id provided by the client
     actual_session_id = req.session_id

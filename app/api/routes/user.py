@@ -16,6 +16,8 @@ from fastapi.concurrency import run_in_threadpool
 from datetime import datetime, timedelta
 from app.core.auth.oauth2 import get_current_user
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from passlib.context import CryptContext
+
 
 token_auth_scheme = HTTPBearer()
 
@@ -52,6 +54,7 @@ from app.core.auth.token_blacklist import add_to_blacklist
 from app.services.email_service import generate_otp, validate_email, send_otp_email
 from app.services.admin_service import create_admin
 
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -214,15 +217,35 @@ async def user_login(payload: UserLoginRequest):
         login_identifier = payload.email
         password = payload.password
 
+        print("DEBUG: Raw Email Input:", payload.email)
+        print("DEBUG: Login Identifier:", login_identifier)
+
         user_doc = await find_user_by_identifier(db, login_identifier)
+        print("DEBUG: User Document:", user_doc)
         if not user_doc:
+            print("DEBUG: Login Failed - Invalid credentials")
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
         # Verify password
-        stored_hash = user_doc.get("password_hash")
-        if not stored_hash or not await run_in_threadpool(Hash.checkpw, password.encode(), stored_hash.encode()):
-            raise HTTPException(status_code=401, detail="Invalid credentials")
+        # stored_hash = user_doc.get("password_hash")
+        # if not stored_hash or not await run_in_threadpool(Hash.checkpw, password.encode(), stored_hash.encode()):
+        #     raise HTTPException(status_code=401, detail="Invalid credentials")
 
+        stored_hash = user_doc.get("password_hash")
+        
+        print("DEBUG: Stored Hash:", stored_hash)
+        print("DEBUG: Input Password:", password)
+
+        try:
+            verify_result = await run_in_threadpool(pwd_context.verify, password, stored_hash) if stored_hash else False
+            print("DEBUG: Password Verify Result:", verify_result)
+        except Exception as e:
+            print("DEBUG: Verification Error:", str(e))
+
+        if not stored_hash or not await run_in_threadpool(pwd_context.verify, password, stored_hash):
+            print("DEBUG: Login Failed - Invalid credentials")
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+            
         # Update last login
         if not user_doc or "_id" not in user_doc:
             raise HTTPException(status_code=500, detail="User data corrupted")
@@ -266,6 +289,8 @@ async def user_login(payload: UserLoginRequest):
             f" Login Successful | Type: {identifier_type} | Role: {user_role}"
         )
 
+        print("DEBUG: Login Success for user_id:", str(user_doc["_id"]))
+
         return UserLoginResponse(
             status="success",
             message="Login successful",
@@ -273,7 +298,7 @@ async def user_login(payload: UserLoginRequest):
             access_token=access_token,
             refresh_token=refresh_token,
         )
-
+# print("USER FROM DB:", user)
     except HTTPException:
         raise
     except Exception as e:

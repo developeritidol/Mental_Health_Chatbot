@@ -74,12 +74,18 @@ def detect_identifier_type(identifier: str) -> Literal["email", "phone"]:
 
 
 async def find_user_by_identifier(db, identifier: str):
+    identifier = identifier.strip().lower()
     identifier_type = detect_identifier_type(identifier)
     query_map = {
         "email":    {"email": identifier},
         "phone":    {"phone_number": identifier},
     }
-    user_doc = await db.users.find_one(query_map[identifier_type])
+    query = query_map[identifier_type]
+
+    user_doc = await db.users.find_one(query)
+    if not user_doc:
+        user_doc = await db.admins.find_one(query)
+
     # Validate database response
     if user_doc and not isinstance(user_doc, dict):
         logger.error("Database returned invalid user document format")
@@ -214,42 +220,26 @@ async def user_login(payload: UserLoginRequest):
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed. Please try again later.")
 
-        login_identifier = payload.email
+        login_identifier = payload.email.strip().lower()
         password = payload.password
 
-        print("DEBUG: Raw Email Input:", payload.email)
-        print("DEBUG: Login Identifier:", login_identifier)
-
         user_doc = await find_user_by_identifier(db, login_identifier)
-        print("DEBUG: User Document:", user_doc)
         if not user_doc:
-            print("DEBUG: Login Failed - Invalid credentials")
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
         # Verify password
-        # stored_hash = user_doc.get("password_hash")
-        # if not stored_hash or not await run_in_threadpool(Hash.checkpw, password.encode(), stored_hash.encode()):
-        #     raise HTTPException(status_code=401, detail="Invalid credentials")
-
         stored_hash = user_doc.get("password_hash")
-        
-        print("DEBUG: Stored Hash:", stored_hash)
-        print("DEBUG: Input Password:", password)
-
-        try:
-            verify_result = await run_in_threadpool(pwd_context.verify, password, stored_hash) if stored_hash else False
-            print("DEBUG: Password Verify Result:", verify_result)
-        except Exception as e:
-            print("DEBUG: Verification Error:", str(e))
 
         if not stored_hash or not await run_in_threadpool(pwd_context.verify, password, stored_hash):
-            print("DEBUG: Login Failed - Invalid credentials")
             raise HTTPException(status_code=401, detail="Invalid credentials")
             
         # Update last login
         if not user_doc or "_id" not in user_doc:
             raise HTTPException(status_code=500, detail="User data corrupted")
-        await db.users.update_one(
+            
+        collection = db.admins if user_doc.get("is_admin") else db.users
+
+        await collection.update_one(
             {"_id": user_doc["_id"]},
             {"$set": {"last_login": datetime.utcnow()}}
         )
@@ -289,8 +279,6 @@ async def user_login(payload: UserLoginRequest):
             f" Login Successful | Type: {identifier_type} | Role: {user_role}"
         )
 
-        print("DEBUG: Login Success for user_id:", str(user_doc["_id"]))
-
         return UserLoginResponse(
             status="success",
             message="Login successful",
@@ -309,17 +297,18 @@ async def user_login(payload: UserLoginRequest):
 async def forgot_password(payload: ForgotPasswordRequest):
     """Send OTP to user's email for password reset."""
     try:
-        logger.info(f" Forgot password request | Email: {payload.email}")
+        masked_email = payload.email[:2] + "***" + payload.email.split("@")[-1] if "@" in payload.email else "***"
+        logger.info(f" Forgot password request | Email: {masked_email}")
 
         db = get_database()
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed. Please try again later.")
 
         # Check if email exists
-        user_doc = await db.users.find_one({"email": payload.email.strip().lower()})
+        user_doc = await find_user_by_identifier(db, payload.email)
         if not user_doc:
             # For security, don't reveal if email exists or not
-            logger.warning(f"Forgot password attempt for non-existent email: {payload.email}")
+            logger.warning(f"Forgot password attempt for non-existent email: {masked_email}")
             return ForgotPasswordResponse(
                 status="success",
                 message="If your email is registered, you will receive an OTP shortly.",
@@ -332,7 +321,9 @@ async def forgot_password(payload: ForgotPasswordRequest):
         # Store OTP in database
         if not user_doc or "_id" not in user_doc:
             raise HTTPException(status_code=500, detail="User data corrupted")
-        await db.users.update_one(
+            
+        collection = db.admins if user_doc.get("is_admin") else db.users
+        await collection.update_one(
             {"_id": user_doc["_id"]},
             {"$set": {"password_reset_token": otp, "password_reset_expires": expires_at}}
         )
@@ -344,10 +335,10 @@ async def forgot_password(payload: ForgotPasswordRequest):
             email_sent = False
 
         if not email_sent:
-            logger.error(f"Failed to send OTP email to {payload.email}")
+            logger.error(f"Failed to send OTP email to {masked_email}")
             raise HTTPException(status_code=500, detail="Failed to send OTP email. Please try again later.")
 
-        logger.info(f" Password reset OTP sent to {payload.email}")
+        logger.info(f" Password reset OTP sent to {masked_email}")
         return ForgotPasswordResponse(
             status="success",
             message="OTP sent to your email. Please check your inbox.",
@@ -363,13 +354,14 @@ async def forgot_password(payload: ForgotPasswordRequest):
 async def verify_otp(payload: VerifyOtpRequest):
     """Verify OTP for password reset."""
     try:
-        logger.info(f" OTP verification attempt | Email: {payload.email}")
+        masked_email = payload.email[:2] + "***" + payload.email.split("@")[-1] if "@" in payload.email else "***"
+        logger.info(f" OTP verification attempt | Email: {masked_email}")
 
         db = get_database()
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed. Please try again later.")
 
-        user_doc = await db.users.find_one({"email": payload.email.strip().lower()})
+        user_doc = await find_user_by_identifier(db, payload.email)
         if not user_doc:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -388,12 +380,14 @@ async def verify_otp(payload: VerifyOtpRequest):
         # OTP is valid, clear it from database
         if not user_doc or "_id" not in user_doc:
             raise HTTPException(status_code=500, detail="User data corrupted")
-        await db.users.update_one(
+            
+        collection = db.admins if user_doc.get("is_admin") else db.users
+        await collection.update_one(
             {"_id": user_doc["_id"]},
             {"$unset": {"password_reset_token": "", "password_reset_expires": ""}}
         )
 
-        logger.info(f" OTP verified successfully for {payload.email}")
+        logger.info(f" OTP verified successfully for {masked_email}")
         return VerifyOtpResponse(
             status="success",
             message="OTP verified successfully. You can now reset your password.",
@@ -409,13 +403,14 @@ async def verify_otp(payload: VerifyOtpRequest):
 async def reset_password(payload: ResetPasswordRequest):
     """Reset password after OTP verification."""
     try:
-        logger.info(f" Password reset attempt | Email: {payload.email}")
+        masked_email = payload.email[:2] + "***" + payload.email.split("@")[-1] if "@" in payload.email else "***"
+        logger.info(f" Password reset attempt | Email: {masked_email}")
 
         db = get_database()
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed. Please try again later.")
 
-        user_doc = await db.users.find_one({"email": payload.email.strip().lower()})
+        user_doc = await find_user_by_identifier(db, payload.email)
         if not user_doc:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -432,12 +427,14 @@ async def reset_password(payload: ResetPasswordRequest):
         # Update password
         if not user_doc or "_id" not in user_doc:
             raise HTTPException(status_code=500, detail="User data corrupted")
-        await db.users.update_one(
+            
+        collection = db.admins if user_doc.get("is_admin") else db.users
+        await collection.update_one(
             {"_id": user_doc["_id"]},
             {"$set": {"password_hash": password_hash, "last_active": datetime.utcnow()}}
         )
 
-        logger.info(f" Password reset successfully for {payload.email}")
+        logger.info(f" Password reset successfully for {masked_email}")
         return ResetPasswordResponse(
             status="success",
             message="Password reset successfully. You can now login with your new password.",

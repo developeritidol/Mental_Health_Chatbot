@@ -458,7 +458,7 @@ async def refresh_token(payload: RefreshTokenRequest):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-        token_data = await run_in_threadpool(verify_refresh_token, payload.refresh_token, credentials_exception)
+        token_data = await verify_refresh_token(payload.refresh_token, credentials_exception)
 
         # Get user from database to fetch role
         db = get_database()
@@ -499,7 +499,7 @@ async def user_logout(
     current_user: dict = Depends(get_current_user),
 ):
     try:
-        await run_in_threadpool(add_to_blacklist, credentials.credentials)
+        await add_to_blacklist(credentials.credentials)
 
         return {
             "status": "success", 

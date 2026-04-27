@@ -197,6 +197,49 @@ async def get_existing_session(user_id: str) -> Optional[dict]:
         return None
 
 
+async def get_session_history(session_id: str, limit: int = 20) -> list:
+    """Returns the last N messages for a session in chronological order."""
+    db = get_database()
+    if db is None:
+        return []
+    try:
+        cursor = db.messages.find(
+            {"session_id": session_id},
+            sort=[("timestamp", -1)],
+            limit=limit,
+        )
+        messages = await cursor.to_list(length=limit)
+        return list(reversed(messages))
+    except Exception as e:
+        logger.error(f"get_session_history failed for session {session_id}: {e}")
+        return []
+
+
+async def upsert_session(user_id: str, session_id: str) -> Optional[dict]:
+    """Creates a session document if it does not exist, then returns it."""
+    db = get_database()
+    if db is None:
+        return None
+    try:
+        await db.sessions.update_one(
+            {"session_id": session_id},
+            {"$setOnInsert": {
+                "session_id": session_id,
+                "user_id": user_id,
+                "is_active": True,
+                "is_escalated": False,
+                "lethality_alert": False,
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }},
+            upsert=True,
+        )
+        return await db.sessions.find_one({"session_id": session_id})
+    except Exception as e:
+        logger.error(f"upsert_session failed for session {session_id}: {e}")
+        return None
+
+
 async def create_session(session_data: dict) -> bool:
     """Creates a new session document."""
     db = get_database()

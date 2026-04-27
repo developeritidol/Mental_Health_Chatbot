@@ -66,9 +66,12 @@ class EscalatedSessionResponse(BaseModel):
     user_id: str
     first_name: str = "Unknown"
     last_name: Optional[str] = None
-    is_escalated: bool
+    is_active: bool = True          # ← was silently dropped before (Issue #3)
+    is_escalated: bool = True
+    lethality_alert: bool = False
     escalated_at: Optional[str] = None
     created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 class EscalatedSessionListResponse(BaseModel):

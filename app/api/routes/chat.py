@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timezone
 from app.core.config import get_settings
@@ -85,9 +86,7 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
  
     # 1. Load profile from DB
     profile = await get_user_profile(user_id)
-    print("USER_ID:", user_id)
-    print("PROFILE:", profile)
- 
+
     # Use the session_id provided by the client
     actual_session_id = req.session_id
  
@@ -181,14 +180,14 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
     if consensus.get("is_crisis") is True:
         logger.warning(f"[ESCALATION] Crisis detected for user {user_id}. Escalating in background and streaming AI response consistently.")
         await escalate_session(actual_session_id)
-       
-       
-        await manager.broadcast_to_dashboard({
+
+        # Non-blocking: dashboard broadcast must not delay the user's crisis SSE stream
+        asyncio.create_task(manager.broadcast_to_dashboard({
             "type": "new_escalation",
             "session_id": actual_session_id,
             "user_id": user_id,
             "timestamp": datetime.now(timezone.utc).isoformat()
-        })
+        }))
  
     # ── STEP 7: Normal AI stream ───────────────────────────────────────────────
     async def generate():

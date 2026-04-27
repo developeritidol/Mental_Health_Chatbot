@@ -115,15 +115,12 @@ def validate_account_status(user_doc: dict) -> None:
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
-@router.post("/register", response_model=UserProfileData)
+@router.post("/register", response_model=UserLoginResponse)
 async def user_register(payload: UserCreateRequest):
     """Register a new user via JSON body."""
     try:
-        if payload.is_user and payload.is_admin:
-            raise HTTPException(status_code=400, detail="You can't select multiple roles")
-
-        if not payload.is_user and not payload.is_admin:
-            raise HTTPException(status_code=400, detail="Role can't be empty")
+        # Role validation - single is_user field determines role
+        # is_user = True -> regular user, is_user = False -> admin
 
         masked_email = payload.email[:2] + "***" + payload.email.split("@")[1] if "@" in payload.email else "***"
         logger.info(f" Registration attempt | Email: {masked_email}")
@@ -161,7 +158,6 @@ async def user_register(payload: UserCreateRequest):
             phone_number=phone_number,
             password_hash=password_hash,
             is_user=payload.is_user,
-            is_admin=payload.is_admin,
             professional_role=payload.professional_role,
             license_number=payload.license_number,
             state_of_licensure=payload.state_of_licensure,
@@ -175,7 +171,7 @@ async def user_register(payload: UserCreateRequest):
         if payload.is_user:
             result = await db.users.insert_one(user.dict(by_alias=True, exclude_none=True))
             role_log = "user"
-        elif payload.is_admin:
+        else:  # payload.is_user = False means admin
             result = await db.admins.insert_one(user.dict(by_alias=True, exclude_none=True))
             role_log = "admin"
 
@@ -184,13 +180,19 @@ async def user_register(payload: UserCreateRequest):
         masked_email_log = email[:2] + "***" + email.split("@")[1] if "@" in email else "***"
         logger.info(f" User Registered: {masked_email_log} | Role: {role_log}")
 
-        return UserProfileData(
+        # Generate tokens for immediate login after registration
+        token_subject = email
+        user_role = "admin" if not user.is_user else "user"  # is_user=False means admin
+        access_token = create_access_token(data={"sub": token_subject, "role": user_role, "user_id": user_id})
+        refresh_token = create_refresh_token(data={"sub": token_subject, "role": user_role, "user_id": user_id})
+
+        # Create user profile data for response
+        user_data = UserProfileData(
             user_id=user_id,
             full_name=user.full_name or "",
             email=user.email or "",
             phone_number=user.phone_number or "",
             is_user=user.is_user,
-            is_admin=user.is_admin,
             professional_role=user.professional_role,
             license_number=user.license_number,
             state_of_licensure=user.state_of_licensure,
@@ -201,6 +203,14 @@ async def user_register(payload: UserCreateRequest):
             consultation_mode=user.consultation_mode,
             created_at=user.created_at,
             last_login=user.last_login,
+        )
+
+        return UserLoginResponse(
+            status="success",
+            message="Registration successful",
+            user=user_data,
+            access_token=access_token,
+            refresh_token=refresh_token,
         )
 
     except HTTPException as http_exc:
@@ -237,15 +247,15 @@ async def user_login(payload: UserLoginRequest):
         if not user_doc or "_id" not in user_doc:
             raise HTTPException(status_code=500, detail="User data corrupted")
             
-        collection = db.admins if user_doc.get("is_admin") else db.users
+        collection = db.admins if not user_doc.get("is_user", True) else db.users
 
         await collection.update_one(
             {"_id": user_doc["_id"]},
             {"$set": {"last_login": datetime.utcnow()}}
         )
 
-        # Determine role for JWT
-        user_role = "admin" if user_doc.get("is_admin") else "user"
+        # Determine role for JWT - is_user=False means admin
+        user_role = "admin" if not user_doc.get("is_user", True) else "user"
 
         # Extract user_id BEFORE using it
         if not user_doc or "_id" not in user_doc:
@@ -259,7 +269,6 @@ async def user_login(payload: UserLoginRequest):
             email=user_doc.get("email", ""),
             phone_number=user_doc.get("phone_number", ""),
             is_user=user_doc.get("is_user", True),
-            is_admin=user_doc.get("is_admin", False),
             professional_role=user_doc.get("professional_role"),
             license_number=user_doc.get("license_number"),
             state_of_licensure=user_doc.get("state_of_licensure"),

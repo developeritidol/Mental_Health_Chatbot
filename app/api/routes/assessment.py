@@ -72,18 +72,21 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
         {"$set": update_doc}
     )
 
-    # 2. Check if this user already has a session
-    existing = await db.sessions.find_one({"user_id": user_id}, sort=[("created_at", -1)])
-    if existing:
-        session_id = existing.get("session_id")
-        logger.info(f"Reusing existing session {session_id} for user {user_id}")
-        return AssessmentResponse(
-            status="success",
-            session_id=session_id,
-            opening_message="Welcome back! How are you feeling today?",
-            timestamp=datetime.now(timezone.utc),
-            user_id=user_id,
-        )
+    # 2. Enforce strict single active session rule
+    # Find and close any existing active sessions for this user
+    existing_active_sessions = await db.sessions.find({
+        "user_id": user_id,
+        "is_active": True
+    }).to_list(length=None)
+    
+    if existing_active_sessions:
+        logger.info(f"Found {len(existing_active_sessions)} active sessions for user {user_id}. Closing them before creating new session.")
+        for session in existing_active_sessions:
+            await db.sessions.update_one(
+                {"session_id": session.get("session_id")},
+                {"$set": {"is_active": False, "ended_at": datetime.now(timezone.utc)}}
+            )
+            logger.info(f"Closed active session {session.get('session_id')} for user {user_id}")
 
     # 3. No session exists — create a new one
     session_id = str(uuid.uuid4())

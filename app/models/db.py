@@ -24,7 +24,6 @@ class UserModelDB(BaseModel):
     password_hash: Optional[str] = None
     phone_number: Optional[str] = None
     is_user: bool = True
-    is_admin: bool = False
     professional_role: Optional[str] = None  # e.g., "Licensed Psychologist (PhD / PsyD)"
     license_number: Optional[str] = None
     state_of_licensure: Optional[str] = None

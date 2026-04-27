@@ -50,8 +50,7 @@ class UserCreateRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=128)
     phone_number: str = Field(..., pattern=r"^\+?[1-9]\d{1,14}$")
-    is_user: bool = Field(..., description="Required boolean field")
-    is_admin: bool = Field(..., description="Required boolean field")
+    is_user: bool = Field(..., description="Required boolean field: True for user, False for admin")
     professional_role: Optional[str] = "str"
     license_number: Optional[str] = "str"
     state_of_licensure: Optional[str] = "str"
@@ -61,16 +60,6 @@ class UserCreateRequest(BaseModel):
     state: Optional[str] = "str"
     consultation_mode: Optional[str] = "str"
 
-    @validator('is_user')
-    def validate_user_role(cls, v, values):
-        # If both roles are false, default is_user to true
-        if 'is_admin' in values and not values['is_admin'] and not v:
-            return True
-        # Prevent both roles from being true (business logic)
-        if 'is_admin' in values and values['is_admin'] and v:
-            raise ValueError('User cannot be both admin and regular user simultaneously')
-        return v
-
     class Config:
         schema_extra = {
             "example": {
@@ -79,7 +68,6 @@ class UserCreateRequest(BaseModel):
                 "password": "Abcd@1234",
                 "phone_number": "+911234567890",
                 "is_user": True,
-                "is_admin": False,
                 "professional_role": None,
                 "license_number": None,
                 "state_of_licensure": None,

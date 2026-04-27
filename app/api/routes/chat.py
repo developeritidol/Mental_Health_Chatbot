@@ -79,6 +79,12 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
     Android sends: session_id + user_id + message.
     Server loads profile and history from MongoDB automatically.
     """
+    # Strict validation for user_id and session_id
+    if not req.user_id or not req.user_id.strip():
+        raise HTTPException(status_code=400, detail="add valid user_id and session_id")
+    if not req.session_id or not req.session_id.strip():
+        raise HTTPException(status_code=400, detail="add valid user_id and session_id")
+    
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
  

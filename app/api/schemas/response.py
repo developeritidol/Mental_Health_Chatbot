@@ -104,7 +104,6 @@ class UserProfileData(BaseModel):
     email: str
     phone_number: str
     is_user: bool = True
-    is_admin: bool = False
     professional_role: Optional[str] = "str"
     license_number: Optional[str] = "str"
     state_of_licensure: Optional[str] = "str"
@@ -124,7 +123,6 @@ class UserProfileData(BaseModel):
                 "email": "john@example.com",
                 "phone_number": "+911234567890",
                 "is_user": True,
-                "is_admin": False,
                 "professional_role": "Licensed Psychologist (PhD / PsyD)",
                 "license_number": "LIC12345",
                 "state_of_licensure": "California",

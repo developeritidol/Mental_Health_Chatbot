@@ -14,9 +14,10 @@ async def create_admin(db, user_id: str, admin_payload: dict) -> bool:
         logger.error(f"event=admin_create_failed user_id={user_id} error={str(e)}")
         return False
 
-
 async def update_admin(db, user_id: str, admin_updates: dict) -> bool:
     try:
+        admin_updates.pop("user_id", None)
+        admin_updates.pop("_id", None)
         result = await db.admins.update_one({"user_id": user_id}, {"$set": admin_updates})
         if result.matched_count == 0:
             logger.warning(f"event=admin_update_missing user_id={user_id}")

@@ -20,5 +20,8 @@ build/
 *.swp
 *.swo
 venv/
-
-Md files/
+.postman/
+Md\ files/
+pytest.ini
+requirements-test.txt
+tests/test_auth_and_sessions.py

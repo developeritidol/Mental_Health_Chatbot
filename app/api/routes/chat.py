@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timezone
 from app.core.config import get_settings
@@ -34,6 +35,7 @@ from app.services.db_service import (
     is_user_escalated,
     get_existing_session,
 )
+from app.api.routes.human import manager
  
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -84,22 +86,17 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
  
     # 1. Load profile from DB
     profile = await get_user_profile(user_id)
-    if not profile:
-        raise HTTPException(
-            status_code=404,
-            detail="Profile not found. Complete assessment first.",
-        )
- 
+
     # Use the session_id provided by the client
     actual_session_id = req.session_id
  
     # 1b. Guard: Check if the CURRENT session is escalated (not any session)
-    current_session = await get_existing_session(req.user_id)
+    current_session = await get_existing_session(user_id)
     if current_session and current_session.get("is_escalated"):
         _settings = get_settings()
-        ws_url = f"ws://{_settings.SERVER_HOST}:{_settings.SERVER_PORT}/api/human/chat/{req.user_id}"
+        ws_url = f"ws://{_settings.SERVER_HOST}:{_settings.SERVER_PORT}/api/human/chat/{user_id}"
 
-        logger.info(f"[GUARD] Session {current_session.get('session_id')} for user {req.user_id} is escalated. Blocking AI and sending redirect.")
+        logger.info(f"[GUARD] Session {current_session.get('session_id')} for user {user_id} is escalated. Blocking AI and sending redirect.")
        
         redirect_payload = {
             "done": True,
@@ -124,14 +121,14 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
     recent_history_str = _build_recent_history_string(history, n_turns=4)
  
     logger.info("\n" + "═" * 70)
-    logger.info(f"[STREAM] User: {req.user_id} | Session: {actual_session_id} | Turn: {turn_count}")
+    logger.info(f"[STREAM] User: {user_id} | Session: {actual_session_id} | Turn: {turn_count}")
     logger.info(f"[USER]:  {req.message}")
     logger.info("═" * 70)
  
     # 3. Generate embedding and retrieve long-term memory (RAG)
     query_vector = await generate_embedding(req.message)
     long_term_memory = await retrieve_long_term_memory(
-        user_id=req.user_id,
+        user_id=user_id,
         query_vector=query_vector,
         exclude_session_id=actual_session_id,
     )
@@ -139,7 +136,7 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
     # 4. Save user message to DB (embedding is stored inside save_message automatically)
     await save_message({
         "session_id": actual_session_id,
-        "user_id": req.user_id,
+        "user_id": user_id,
         "turn_number": turn_count + 1,
         "role": "user",
         "content": req.message,
@@ -181,16 +178,16 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
  
     # ── STEP 6: Crisis fork — escalate to human but stream normally ───────────
     if consensus.get("is_crisis") is True:
-        logger.warning(f"[ESCALATION] Crisis detected for user {req.user_id}. Escalating in background and streaming AI response consistently.")
+        logger.warning(f"[ESCALATION] Crisis detected for user {user_id}. Escalating in background and streaming AI response consistently.")
         await escalate_session(actual_session_id)
-       
-       
-        await manager.broadcast_to_dashboard({
+
+        # Non-blocking: dashboard broadcast must not delay the user's crisis SSE stream
+        asyncio.create_task(manager.broadcast_to_dashboard({
             "type": "new_escalation",
             "session_id": actual_session_id,
-            "user_id": req.user_id,
+            "user_id": user_id,
             "timestamp": datetime.now(timezone.utc).isoformat()
-        })
+        }))
  
     # ── STEP 7: Normal AI stream ───────────────────────────────────────────────
     async def generate():
@@ -236,7 +233,7 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
  
             await save_message({
                 "session_id": actual_session_id,
-                "user_id": req.user_id,
+                "user_id": user_id,
                 "turn_number": turn_count + 1,
                 "role": "assistant",
                 "content": final,

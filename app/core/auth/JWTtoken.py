@@ -113,21 +113,22 @@ def verify_refresh_token(token: str, credentials_exception):
 def verify_token(token: str, credentials_exception):
     settings = get_settings()
 
-    # Blacklist check
-    if is_token_blacklisted(token):
-        logger.warning("event=access_token_rejected reason=blacklisted")
-        raise HTTPException(
-            status_code=401,
-            detail="Token has been revoked. Please login again.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
     try:
+        # Atomic: Decode token first to validate format
         payload = jwt.decode(
             token,
             settings.SECRET_KEY,
             algorithms=[settings.ALGORITHM]
         )
+
+        # Atomic: Check blacklist immediately after successful decode
+        if is_token_blacklisted(token):
+            logger.warning("event=access_token_rejected reason=blacklisted")
+            raise HTTPException(
+                status_code=401,
+                detail="Token has been revoked. Please login again.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
         user_id = payload.get("user_id")
         email = payload.get("sub")

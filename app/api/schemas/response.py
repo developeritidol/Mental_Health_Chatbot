@@ -66,10 +66,12 @@ class EscalatedSessionResponse(BaseModel):
     user_id: str
     first_name: str = "Unknown"
     last_name: Optional[str] = None
-    username: Optional[str] = None
-    is_escalated: bool
+    is_active: bool = True          # ← was silently dropped before (Issue #3)
+    is_escalated: bool = True
+    lethality_alert: bool = False
     escalated_at: Optional[str] = None
     created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 class EscalatedSessionListResponse(BaseModel):
@@ -97,42 +99,40 @@ class TokenData(BaseModel):
 # ── User Profile ──────────────────────────────────────────────
 
 class UserProfileData(BaseModel):
+    user_id: str
     full_name: str
-    username: str
     email: str
     phone_number: str
-    role: str
-    professional_role: Optional[str] = None
-    license_number: Optional[str] = None
-    state_of_licensure: Optional[str] = None
-    npi_number: Optional[str] = None
-    practice_type: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    consultation_mode: Optional[str] = None
-    user_id: Optional[str] = None
-    is_active: bool = True
+    is_user: bool = True
+    is_admin: bool = False
+    professional_role: Optional[str] = "str"
+    license_number: Optional[str] = "str"
+    state_of_licensure: Optional[str] = "str"
+    npi_number: Optional[str] = "str"
+    practice_type: Optional[str] = "str"
+    city: Optional[str] = "str"
+    state: Optional[str] = "str"
+    consultation_mode: Optional[str] = "str"
+    created_at: Optional[datetime] = None
     last_login: Optional[datetime] = None
 
     model_config = {
         "json_schema_extra": {
             "example": {
+                "user_id": "12345",
                 "full_name": "John Doe",
-                "username": "john_doe",
                 "email": "john@example.com",
                 "phone_number": "+911234567890",
-                "role": "user",
-                "professional_role": None,
-                "license_number": None,
-                "state_of_licensure": None,
-                "npi_number": None,
-                "practice_type": None,
-                "city": None,
-                "state": None,
-                "consultation_mode": None,
-                "user_id": "user_12345",
-                "is_active": True,
-                "last_login": None
+                "is_user": True,
+                "is_admin": False,
+                "professional_role": "Licensed Psychologist (PhD / PsyD)",
+                "license_number": "LIC12345",
+                "state_of_licensure": "California",
+                "npi_number": "1234567890",
+                "practice_type": "Private",
+                "city": "Los Angeles",
+                "state": "CA",
+                "consultation_mode": "In-person"
             }
         }
     }

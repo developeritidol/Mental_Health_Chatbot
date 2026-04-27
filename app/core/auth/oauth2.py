@@ -25,7 +25,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(t
     )
 
     # Decode + validate token
-    token_data = verify_token(token, credentials_exception)
+    token_data = await verify_token(token, credentials_exception)
 
     # ✅ FIXED: use user_id as primary key
     user_doc = {

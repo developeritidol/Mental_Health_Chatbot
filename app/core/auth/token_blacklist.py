@@ -1,15 +1,11 @@
 import hashlib
 from datetime import datetime, timezone
 from jose import jwt, JWTError
-from pymongo import MongoClient
 
 from app.core.config import get_settings
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
-
-# Global singleton to prevent connection pool exhaustion
-_blacklist_client = None
 
 
 def _token_hash(token: str) -> str:
@@ -25,17 +21,17 @@ def _extract_exp(token: str) -> datetime:
     return datetime.fromtimestamp(exp, tz=timezone.utc)
 
 
-def _get_blacklist_collection():
-    global _blacklist_client
-    settings = get_settings()
-    if _blacklist_client is None:
-        _blacklist_client = MongoClient(settings.MONGODB_URL)
-    return _blacklist_client[settings.DATABASE_NAME].token_blacklist
+def _get_collection():
+    from app.core.database import get_database
+    db = get_database()
+    if db is None:
+        raise RuntimeError("Database not initialised — ensure connect_to_mongo() has run")
+    return db.token_blacklist
 
 
-def add_to_blacklist(token: str) -> None:
+async def add_to_blacklist(token: str) -> None:
     try:
-        collection = _get_blacklist_collection()
+        collection = _get_collection()
         token_expiry = _extract_exp(token)
         now_utc = datetime.now(timezone.utc)
         if token_expiry <= now_utc:
@@ -43,8 +39,8 @@ def add_to_blacklist(token: str) -> None:
             return
 
         token_hash = _token_hash(token)
-        collection.update_one(
-            {"token_hash": _token_hash(token)},
+        await collection.update_one(
+            {"token_hash": token_hash},
             {"$set": {"token_hash": token_hash, "expires_at": token_expiry}},
             upsert=True,
         )
@@ -57,11 +53,11 @@ def add_to_blacklist(token: str) -> None:
         raise
 
 
-def is_token_blacklisted(token: str) -> bool:
+async def is_token_blacklisted(token: str) -> bool:
     try:
-        collection = _get_blacklist_collection()
+        collection = _get_collection()
         now_utc = datetime.now(timezone.utc)
-        doc = collection.find_one(
+        doc = await collection.find_one(
             {"token_hash": _token_hash(token), "expires_at": {"$gt": now_utc}}
         )
         return doc is not None
@@ -70,20 +66,20 @@ def is_token_blacklisted(token: str) -> bool:
         return False
 
 
-def cleanup_expired_blacklist() -> None:
+async def cleanup_expired_blacklist() -> None:
     try:
-        collection = _get_blacklist_collection()
+        collection = _get_collection()
         now_utc = datetime.now(timezone.utc)
-        collection.delete_many({"expires_at": {"$lte": now_utc}})
+        await collection.delete_many({"expires_at": {"$lte": now_utc}})
     except Exception as e:
         logger.error(f"event=token_blacklist_cleanup_failed error={str(e)}")
 
 
-def get_blacklist_size() -> int:
+async def get_blacklist_size() -> int:
     try:
-        collection = _get_blacklist_collection()
+        collection = _get_collection()
         now_utc = datetime.now(timezone.utc)
-        return collection.count_documents({"expires_at": {"$gt": now_utc}})
+        return await collection.count_documents({"expires_at": {"$gt": now_utc}})
     except Exception as e:
         logger.error(f"event=token_blacklist_size_failed error={str(e)}")
         return 0

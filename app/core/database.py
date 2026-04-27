@@ -35,10 +35,14 @@ async def connect_to_mongo():
         )
         await db_manager.db.sessions.create_index("session_id", unique=True)
         await db_manager.db.sessions.create_index("user_id")
+        await db_manager.db.sessions.create_index("assigned_counselor_id")
         await db_manager.db.messages.create_index("session_id")
         await db_manager.db.messages.create_index([("session_id", 1), ("timestamp", 1)])
         await db_manager.db.token_blacklist.create_index("token_hash", unique=True)
         await db_manager.db.token_blacklist.create_index("expires_at", expireAfterSeconds=0)
+        # Smart Routing: counselor availability queries filter on is_online + last_ping
+        await db_manager.db.admins.create_index([("is_online", 1), ("last_ping", -1)])
+        await db_manager.db.admins.create_index("current_active_sessions")
         logger.info("MongoDB connected and indexes verified.")
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {e}")

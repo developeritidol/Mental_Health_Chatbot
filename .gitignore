@@ -4,6 +4,7 @@ logs/
 # Environment
 .env
 .venv/
+.env.production
 
 # Python
 __pycache__/
@@ -19,5 +20,8 @@ build/
 *.swp
 *.swo
 venv/
-
-Md files/
+.postman/
+Md\ files/
+pytest.ini
+requirements-test.txt
+tests/test_auth_and_sessions.py

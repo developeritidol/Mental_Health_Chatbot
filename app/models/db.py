@@ -10,7 +10,7 @@ class EmergencyContact(BaseModel):
 
 
 class UserModelDB(BaseModel):
-    device_id: Optional[str] = None
+    user_id: Optional[str] = None
     name: Optional[str] = None
     gender: Optional[str] = None
     age: Optional[int] = None
@@ -20,10 +20,10 @@ class UserModelDB(BaseModel):
 
     # ── Authentication / admin fields ─────────────────────────────────────────
     full_name: Optional[str] = None
-    username: Optional[str] = None
     email: Optional[str] = None
     password_hash: Optional[str] = None
     phone_number: Optional[str] = None
+    is_user: bool = True
     professional_role: Optional[str] = None  # e.g., "Licensed Psychologist (PhD / PsyD)"
     license_number: Optional[str] = None
     state_of_licensure: Optional[str] = None
@@ -32,7 +32,6 @@ class UserModelDB(BaseModel):
     city: Optional[str] = None
     state: Optional[str] = None
     consultation_mode: Optional[str] = None  # e.g., "In-person"
-    role: str = "user"
     is_active: bool = True  # Account status: True=active, False=disabled/suspended
     last_login: Optional[datetime] = None
     password_reset_token: Optional[str] = None
@@ -42,13 +41,39 @@ class UserModelDB(BaseModel):
     last_active: datetime = Field(default_factory=datetime.utcnow)
 
 
+class AdminModelDB(BaseModel):
+    user_id: str = ""
+    full_name: str
+    email: str
+    password_hash: str
+    phone_number: str
+    role: str = "admin"
+    professional_role: str
+    license_number: str
+    state_of_licensure: str
+    npi_number: str
+    practice_type: str
+    city: str
+    state: str
+    consultation_mode: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_login: Optional[datetime] = None
+
+
 class SessionModelDB(BaseModel):
     session_id: str
-    device_id: str
-    is_active: bool = True
-    lethality_alert: bool = False
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    user_id: str = ""
+    doctor_id: Optional[str] = None
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    ended_at: Optional[datetime] = None
+    status: str = "active"
+    summary: Optional[str] = None
+
+    # user_id: str
+    # is_active: bool = True
+    # lethality_alert: bool = False
+    # created_at: datetime = Field(default_factory=datetime.utcnow)
+    # updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class RobertaAnalysis(BaseModel):
@@ -67,7 +92,9 @@ class LLMConsensus(BaseModel):
 
 class MessageModelDB(BaseModel):
     session_id: str
-    turn_number: int
+    sender_type: str = "user"  # "user" or "doctor" or "assistant"
+    sender_id: str = ""
+    turn_number: int = 1
     role: str
     content: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)

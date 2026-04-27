@@ -12,10 +12,8 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Gmail SMTP Configuration
-SENDER_EMAIL ="rutulitidol@gmail.com"
-SENDER_PASSWORD = "zifqrfuksondhcbl"  # Gmail App Password (not regular password)
-# SENDER_EMAIL = os.getenv("SENDER_EMAIL", "")
-# SENDER_PASSWORD = os.getenv("SENDER_PASSWORD", "")  # Gmail App Password (not regular password)
+SENDER_EMAIL = os.getenv("SENDER_EMAIL", "")
+SENDER_PASSWORD = os.getenv("SENDER_PASSWORD", "")
 SENDER_NAME = "MindBridge"
 
 

@@ -16,6 +16,7 @@ import asyncio
 from functools import lru_cache
 from typing import Optional
 
+from transformers import pipeline as hf_pipeline
 from app.core.config import get_settings
 from app.core.logger import get_logger
 
@@ -32,8 +33,7 @@ def _load_pipeline():
     if _pipeline is not None:
         return _pipeline
     try:
-        from transformers import pipeline as hf_pipeline
-        logger.info(f"Loading emotion model: {settings.HF_EMOTION_MODEL}")
+        logger.info(f"Loading emotion model: {settings.HF_EMOTION_MODEL} (local inference — HF_API_TOKEN not used)")
         _pipeline = hf_pipeline(
             task="text-classification",
             model=settings.HF_EMOTION_MODEL,

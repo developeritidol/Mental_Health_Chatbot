@@ -126,6 +126,9 @@ async def upsert_user_profile(user_id: str, profile: dict, personality_answers: 
         **profile
     }
 
+    update_doc.pop("user_id", None)
+    update_doc.pop("_id", None)
+
     try:
         await db.users.update_one(
             {"user_id": user_id},

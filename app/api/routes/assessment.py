@@ -48,7 +48,7 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
     personality_summary = build_personality_summary(personality_dict)
 
     update_doc = {
-        "user_id": user_id,
+        # "user_id": user_id,
         "personality_answers": personality_dict,
         "personality_summary": personality_summary,
         "last_active": datetime.now(timezone.utc),
@@ -60,8 +60,12 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
     if ObjectId.is_valid(user_id):
         query.append({"_id": ObjectId(user_id)})
 
+    update_doc.pop("user_id", None)
+    update_doc.pop("_id", None)
+
     await db.users.update_one(
-        {"$or": query},
+        # {"$or": query},
+        {"user_id": user_id},
         {"$set": update_doc}
     )
 

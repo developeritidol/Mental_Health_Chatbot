@@ -465,7 +465,7 @@ async def refresh_token(payload: RefreshTokenRequest):
         if db is None:
             raise HTTPException(status_code=503, detail="Database connection failed")
 
-        user_doc = await find_user_by_identifier(db, token_data.sub)
+        user_doc = await find_user_by_identifier(db, token_data.email)
         if not user_doc:
             raise HTTPException(status_code=401, detail="User not found")
 
@@ -478,7 +478,7 @@ async def refresh_token(payload: RefreshTokenRequest):
         # Generate new access token
         access_token = create_access_token(data={"sub": token_subject, "role": user_role, "user_id": user_id_str})
 
-        logger.info(f" Access token refreshed for: {token_data.sub}")
+        logger.info(f" Access token refreshed for: {token_data.email}")
 
         return RefreshTokenResponse(
             status="success",

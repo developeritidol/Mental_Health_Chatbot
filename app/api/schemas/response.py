@@ -69,9 +69,9 @@ class EscalatedSessionResponse(BaseModel):
     is_active: bool = True          # ← was silently dropped before (Issue #3)
     is_escalated: bool = True
     lethality_alert: bool = False
-    escalated_at: Optional[str] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    escalated_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
 
 class EscalatedSessionListResponse(BaseModel):

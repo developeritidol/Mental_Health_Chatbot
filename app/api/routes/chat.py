@@ -33,6 +33,7 @@ from app.services.db_service import (
     escalate_session,
     is_user_escalated,
     get_existing_session,
+    upsert_session,
 )
 from app.api.routes.human import manager
  
@@ -88,7 +89,10 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
 
     # Use the session_id provided by the client
     actual_session_id = req.session_id
- 
+
+    # Ensure session document exists so escalate_session can update it
+    await upsert_session(user_id, actual_session_id)
+
     # 1b. Guard: Check if the CURRENT session is escalated (not any session)
     current_session = await get_existing_session(user_id)
     if current_session and current_session.get("is_escalated"):

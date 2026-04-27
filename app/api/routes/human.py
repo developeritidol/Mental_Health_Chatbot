@@ -78,9 +78,9 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
             "is_active": doc.get("is_active", True),
             "is_escalated": doc.get("is_escalated", True),
             "lethality_alert": doc.get("lethality_alert", False),
-            "created_at": doc.get("created_at").replace(tzinfo=timezone.utc) if doc.get("created_at") else None,
-            "updated_at": doc.get("updated_at").replace(tzinfo=timezone.utc) if doc.get("updated_at") else None,
-            "escalated_at": doc.get("escalated_at").replace(tzinfo=timezone.utc) if doc.get("escalated_at") else None,
+            "created_at": doc.get("created_at"),
+            "updated_at": doc.get("updated_at"),
+            "escalated_at": doc.get("escalated_at"),
         })
 
     formatted = [EscalatedSessionResponse(**s) for s in sessions]
@@ -472,13 +472,13 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
       ?role=human_counselor → for the admin dashboard
       ?counselor_name=...   → custom name shown in Android UI
     """
-    # 1. Extract Bearer token from header
+    # 1. Extract Bearer token from header or query param (?token=...)
     auth_header = websocket.headers.get("authorization", "")
-    if not auth_header.startswith("Bearer "):
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
+    if auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1].strip()
+    else:
+        token = websocket.query_params.get("token", "").strip()
 
-    token = auth_header.split(" ")[1].strip()
     if not token:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
@@ -517,7 +517,10 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
         is_escalated = False
         if db is not None:
             try:
-                session_doc = await db.sessions.find_one({"user_id": user_id, "is_escalated": True})
+                session_doc = await db.sessions.find_one(
+                    {"user_id": user_id, "is_escalated": True},
+                    sort=[("escalated_at", -1)],
+                )
                 is_escalated = bool(session_doc)
             except Exception as e:
                 logger.error(f"[WS] DB error checking escalation for user {user_id}: {e}")
@@ -538,7 +541,10 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
     if role == "human_counselor":
         if db is not None:
             try:
-                session_doc = await db.sessions.find_one({"user_id": user_id, "is_escalated": True})
+                session_doc = await db.sessions.find_one(
+                    {"user_id": user_id, "is_escalated": True},
+                    sort=[("escalated_at", -1)],
+                )
             except Exception as e:
                 logger.error(f"[WS] DB error fetching session for counselor on user {user_id}: {e}")
                 await websocket.close(code=1011, reason="Internal server error")
@@ -599,7 +605,7 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
         manager.cancel_timeout_task(user_id)
 
         # Inject handoff brief privately before the user-visible join notice
-        if session_doc and db is not None:
+        if db is not None and session_doc is not None:
             handoff_summary = session_doc.get("handoff_summary")
             if not handoff_summary:
                 # Poll briefly — the LLM summarization task may still be running (~2-4s)
@@ -613,15 +619,19 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
                     except Exception:
                         break
 
+            await websocket.send_json({
+                "type": "system_handoff_brief",
+                "content": handoff_summary or (
+                    "Clinical summary is still being generated. "
+                    "Please review the chat history for context."
+                ),
+                "crisis_category": session_doc.get("crisis_category", "unknown"),
+                "summary_ready": bool(handoff_summary),
+            })
             if handoff_summary:
-                await websocket.send_json({
-                    "type": "system_handoff_brief",
-                    "content": handoff_summary,
-                    "crisis_category": session_doc.get("crisis_category", "unknown"),
-                })
                 logger.info(f"[WS] Handoff brief delivered to counselor {authenticated_user_id}.")
             else:
-                logger.warning(f"[WS] Handoff summary unavailable for session {actual_session_id}.")
+                logger.warning(f"[WS] Handoff summary unavailable for session {actual_session_id} — placeholder sent.")
 
         join_notice = {
             "role": "human_counselor",

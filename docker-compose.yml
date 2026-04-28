@@ -15,3 +15,4 @@ services:
     volumes:
       # Persists logs to the server
       - ./logs:/app/logs
+      - .:/app

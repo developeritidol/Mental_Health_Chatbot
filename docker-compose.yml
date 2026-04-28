@@ -9,9 +9,11 @@ services:
     env_file:
       - .env
     environment:
-      # Connects directly to your MongoDB Atlas cluster if it wasn't specified in .env
-      - MONGODB_URL=${MONGODB_URL:-mongodb+srv://tejashitidoltechnologies_db_user:somLsHQbY2RxXNGJ@cluster0.bdj4ff0.mongodb.net/?appName=Cluster0}
-      - DATABASE_NAME=mindbridge_db
+      # MONGODB_URL must be set in your .env file — no default is provided here.
+      # Running without .env will cause a startup failure (intentional — prevents
+      # accidental connection to production Atlas with a leaked default credential).
+      - MONGODB_URL=${MONGODB_URL:?MONGODB_URL must be set in .env}
+      - DATABASE_NAME=${DATABASE_NAME:-mindbridge_db}
     volumes:
       # Persists logs to the server
       - ./logs:/app/logs

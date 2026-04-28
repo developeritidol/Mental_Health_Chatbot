@@ -8,6 +8,8 @@ If the user already has a session, returns the existing session_id.
 
 import uuid
 from datetime import datetime, timezone
+from bson import ObjectId                              # Fix #3: top-level import
+from bson.errors import InvalidId
 from fastapi import APIRouter, HTTPException, Depends
 
 from app.api.schemas.request import AssessmentRequest
@@ -33,10 +35,11 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
        - If NO:  creates a new session + generates opening message
     """
 
-    if not current_user:
-        raise HTTPException(status_code=401, detail="Authentication required. Please log in.")
-
-    user_id = str(current_user.get("user_id") or current_user.get("_id"))
+    # Fix #4: Harden user_id extraction — never silently continue with an empty ID
+    user_id = current_user.get("user_id") or current_user.get("_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+    user_id = str(user_id)
     logger.info(f"Assessment received for user: {user_id}")
 
     db = get_database()
@@ -48,20 +51,24 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
     personality_summary = build_personality_summary(personality_dict)
 
     update_doc = {
-        "user_id": user_id,
         "personality_answers": personality_dict,
         "personality_summary": personality_summary,
         "last_active": datetime.now(timezone.utc),
     }
 
-    from bson import ObjectId
+    # Fix #7: Fully implement ObjectId fallback so the update works regardless of
+    # whether the user doc was created with user_id or just with _id (ObjectId).
+    or_query = [{"user_id": user_id}]
+    try:
+        or_query.append({"_id": ObjectId(user_id)})
+    except InvalidId:
+        pass  # user_id is not a valid ObjectId — that's fine, only match by user_id
 
-    query = [{"user_id": user_id}]
-    if ObjectId.is_valid(user_id):
-        query.append({"_id": ObjectId(user_id)})
+    update_doc.pop("user_id", None)
+    update_doc.pop("_id", None)
 
     await db.users.update_one(
-        {"$or": query},
+        {"$or": or_query},
         {"$set": update_doc}
     )
 
@@ -94,9 +101,22 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
         logger.error(f"Failed to create session: {e}")
         raise HTTPException(status_code=500, detail="Failed to create session")
 
+    # Fix #10: Fetch real user name from DB; fall back to "Friend" only if missing
+    user_doc = await db.users.find_one({"$or": or_query})
+    user_name = "Friend"
+    if user_doc:
+        user_name = (
+            user_doc.get("name")
+            or user_doc.get("full_name")
+            or current_user.get("name")
+            or "Friend"
+        )
+        # Use first name only for a warmer greeting
+        user_name = user_name.strip().split()[0] if user_name.strip() else "Friend"
+
     # 4. Generate opening message
     llm_profile = {
-        "name": "Friend",  # Default name since personal info is filtered
+        "name": user_name,
         "personality_summary": personality_summary,
         "country": "IN",
     }

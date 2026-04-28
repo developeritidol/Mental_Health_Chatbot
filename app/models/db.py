@@ -38,6 +38,10 @@ class UserModelDB(BaseModel):
     password_reset_token: Optional[str] = None
     password_reset_expires: Optional[datetime] = None
 
+    # ── Smart Routing ─────────────────────────────────────────────────────────
+    preferred_counselor_id: Optional[str] = None   # _id of the last trusted counselor
+    last_crisis_category: Optional[str] = None      # category from previous escalation
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_active: datetime = Field(default_factory=datetime.utcnow)
 
@@ -57,6 +61,12 @@ class AdminModelDB(BaseModel):
     city: str
     state: str
     consultation_mode: str
+    # ── Smart Routing — Presence & Capacity ──────────────────────────────────
+    is_online: bool = False
+    current_active_sessions: int = 0
+    max_concurrent_sessions: int = 3
+    last_ping: Optional[datetime] = None
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_login: Optional[datetime] = None
 
@@ -70,11 +80,10 @@ class SessionModelDB(BaseModel):
     status: str = "active"
     summary: Optional[str] = None
 
-    # user_id: str
-    # is_active: bool = True
-    # lethality_alert: bool = False
-    # created_at: datetime = Field(default_factory=datetime.utcnow)
-    # updated_at: datetime = Field(default_factory=datetime.utcnow)
+    # ── Smart Routing ─────────────────────────────────────────────────────────
+    assigned_counselor_id: Optional[str] = None    # _id string of the routed counselor
+    crisis_category: Optional[str] = None           # Groq consensus category at escalation time
+    handoff_summary: Optional[str] = None           # LLM-generated clinical brief for the counselor
 
 
 class RobertaAnalysis(BaseModel):

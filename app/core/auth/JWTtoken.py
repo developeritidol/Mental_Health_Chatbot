@@ -62,11 +62,10 @@ def create_refresh_token(data: dict):
 # Verify Refresh Token
 # ─────────────────────────────────────────────────────────────
 
-def verify_refresh_token(token: str, credentials_exception):
+async def verify_refresh_token(token: str, credentials_exception):
     settings = get_settings()
 
-    # Blacklist check
-    if is_token_blacklisted(token):
+    if await is_token_blacklisted(token):
         logger.warning("event=refresh_token_rejected reason=blacklisted")
         raise HTTPException(status_code=401, detail="Token is blacklisted")
 
@@ -110,7 +109,7 @@ def verify_refresh_token(token: str, credentials_exception):
 # Verify Access Token
 # ─────────────────────────────────────────────────────────────
 
-def verify_token(token: str, credentials_exception):
+async def verify_token(token: str, credentials_exception):
     settings = get_settings()
 
     try:
@@ -121,8 +120,7 @@ def verify_token(token: str, credentials_exception):
             algorithms=[settings.ALGORITHM]
         )
 
-        # Atomic: Check blacklist immediately after successful decode
-        if is_token_blacklisted(token):
+        if await is_token_blacklisted(token):
             logger.warning("event=access_token_rejected reason=blacklisted")
             raise HTTPException(
                 status_code=401,

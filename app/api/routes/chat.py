@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timezone
 from app.core.config import get_settings
@@ -14,7 +15,6 @@ from app.api.schemas.response import (
 )
  
 # Core
-from app.core.database import get_database
 from app.core.auth.oauth2 import get_current_user
 from app.core.logger import get_logger
  
@@ -33,6 +33,7 @@ from app.services.db_service import (
     escalate_session,
     is_user_escalated,
     get_existing_session,
+    upsert_session,
 )
 from app.api.routes.human import manager
  
@@ -85,12 +86,12 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
  
     # 1. Load profile from DB
     profile = await get_user_profile(user_id)
-    print("USER_ID:", user_id)
-    print("PROFILE:", profile)
- 
     # Use the session_id provided by the client
     actual_session_id = req.session_id
- 
+
+    # Ensure session document exists so escalate_session can update it
+    await upsert_session(user_id, actual_session_id)
+
     # 1b. Guard: Check if the CURRENT session is escalated (not any session)
     current_session = await get_existing_session(user_id)
     if current_session and current_session.get("is_escalated"):
@@ -177,18 +178,31 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
         logger.error(f"[STEP 2 ERROR] {e}")
         consensus = _safe_fallback_consensus()
  
-    # ── STEP 6: Crisis fork — escalate to human but stream normally ───────────
+    # ── STEP 6: Crisis fork ────────────────────────────────────────────────────
     if consensus.get("is_crisis") is True:
-        logger.warning(f"[ESCALATION] Crisis detected for user {user_id}. Escalating in background and streaming AI response consistently.")
+        logger.warning(f"[ESCALATION] Crisis detected for user {user_id} in session {actual_session_id}.")
+
+        # Mark session escalated synchronously so the AI guard in future requests
+        # fires immediately — this must complete before the task below reads the doc.
         await escalate_session(actual_session_id)
-       
-       
-        await manager.broadcast_to_dashboard({
+
+        # Smart routing runs entirely in the background; it must never block the SSE stream.
+        from app.services.routing_service import route_crisis_session
+        asyncio.create_task(
+            route_crisis_session(
+                user_id=user_id,
+                session_id=actual_session_id,
+                consensus=consensus,
+            )
+        )
+
+        # Non-blocking dashboard broadcast
+        asyncio.create_task(manager.broadcast_to_dashboard({
             "type": "new_escalation",
             "session_id": actual_session_id,
             "user_id": user_id,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }))
  
     # ── STEP 7: Normal AI stream ───────────────────────────────────────────────
     async def generate():
@@ -263,27 +277,21 @@ async def get_chat_history(current_user = Depends(get_current_user)):
     Returns ALL messages for the authenticated user, sorted chronologically.
     Used by Android to load conversation history when opening a session.
     """
-    db = get_database()
-    if db is None:
-        raise HTTPException(status_code=500, detail="Database connection failed.")
- 
     user_id = str(current_user.get("user_id") or current_user.get("_id"))
- 
-    cursor = db.messages.find({"user_id": user_id}).sort("timestamp", 1)
-    docs = await cursor.to_list(length=None)
- 
-    formatted_messages = []
-    for doc in docs:
-        if doc.get("content"):
-            formatted_messages.append(
-                ChatMessageResponse(
-                    user_id=doc.get("user_id", user_id),
-                    role=doc.get("role", "unknown"),
-                    content=doc.get("content", ""),
-                    timestamp=doc.get("timestamp").replace(tzinfo=timezone.utc) if doc.get("timestamp") else None
-                )
-            )
- 
+
+    docs = await get_user_messages(user_id)
+
+    formatted_messages = [
+        ChatMessageResponse(
+            user_id=doc.get("user_id", user_id),
+            role=doc.get("role", "unknown"),
+            content=doc.get("content", ""),
+            timestamp=doc.get("timestamp"),
+        )
+        for doc in docs
+        if doc.get("content")
+    ]
+
     return ChatHistoryResponse(
         status="success",
         user_id=user_id,
@@ -300,29 +308,12 @@ async def get_user_sessions(current_user = Depends(get_current_user)):
     Returns ALL sessions for the authenticated user, sorted newest first.
     Used by Android to list all past conversations when the app is reopened.
     """
-   
-    db = get_database()
-    if db is None:
-        raise HTTPException(status_code=500, detail="Database connection failed.")
- 
     user_id = str(current_user.get("user_id") or current_user.get("_id"))
- 
-    cursor = db.sessions.find({"user_id": user_id}).sort("created_at", -1)
-    docs = await cursor.to_list(length=None)
- 
-    sessions = []
-    for doc in docs:
-        sessions.append({
-            "session_id": doc.get("session_id"),
-            "user_id": doc.get("user_id", user_id),
-            "is_active": doc.get("is_active", False),
-            "is_escalated": doc.get("is_escalated", False),
-            "created_at": doc.get("created_at").replace(tzinfo=timezone.utc) if doc.get("created_at") else None,
-            "updated_at": doc.get("updated_at").replace(tzinfo=timezone.utc) if doc.get("updated_at") else None,
-        })
- 
+
+    sessions = await get_all_sessions(user_id)
+
     formatted_sessions = [
-        SessionResponse(**s)
+        SessionResponse(**{**s, "user_id": s.get("user_id") or user_id})
         for s in sessions
     ]
  

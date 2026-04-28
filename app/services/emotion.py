@@ -33,7 +33,7 @@ def _load_pipeline():
     if _pipeline is not None:
         return _pipeline
     try:
-        logger.info(f"Loading emotion model: {settings.HF_EMOTION_MODEL}")
+        logger.info(f"Loading emotion model: {settings.HF_EMOTION_MODEL} (local inference — HF_API_TOKEN not used)")
         _pipeline = hf_pipeline(
             task="text-classification",
             model=settings.HF_EMOTION_MODEL,

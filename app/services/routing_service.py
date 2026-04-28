@@ -123,9 +123,16 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
         preferred_id: Optional[str] = None
 
         # ── Tier 1: Sticky Routing ───────────────────────────────────────────
-        user_doc = await db.users.find_one({"user_id": user_id})
+        try:
+            user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
+        except Exception:
+            user_doc = None
         if not user_doc:
-            logger.error(f"[ROUTING] User {user_id} not found.")
+            logger.error(f"[ROUTING] User {user_id} not found — releasing routing lock.")
+            await db.sessions.update_one(
+                {"session_id": session_id, "assigned_counselor_id": "__routing__"},
+                {"$set": {"assigned_counselor_id": None}},
+            )
             return
 
         preferred_id = user_doc.get("preferred_counselor_id")
@@ -187,13 +194,16 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
         )
 
         # ── Update user's routing profile for next escalation ─────────────────
-        await db.users.update_one(
-            {"user_id": user_id},
-            {"$set": {
-                "preferred_counselor_id": counselor_id_str,
-                "last_crisis_category": crisis_category,
-            }},
-        )
+        try:
+            await db.users.update_one(
+                {"_id": ObjectId(user_id)},
+                {"$set": {
+                    "preferred_counselor_id": counselor_id_str,
+                    "last_crisis_category": crisis_category,
+                }},
+            )
+        except Exception:
+            logger.warning(f"[ROUTING] Could not update preferred counselor for user {user_id}.")
 
         logger.info(
             f"[ROUTING] Session {session_id} assigned to counselor {counselor_id_str} "

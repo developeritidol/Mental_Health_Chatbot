@@ -16,7 +16,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(t
     if token.startswith("Bearer "):
         token = token.split(" ")[1]
 
-    logger.debug(f"Token received for validation: {token[:20]}...")
+    logger.debug(f"Token received for validation: {token[:8]}...")
 
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

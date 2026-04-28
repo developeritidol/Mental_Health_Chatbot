@@ -59,11 +59,10 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
     Returns all sessions that have been flagged for human intervention.
     Used by the Admin Dashboard to show the queue of users needing help.
     """
-    from app.core.database import get_database
     db = get_database()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed.")
-        
+
     query = {"is_escalated": True}
     if user_id:
         query["user_id"] = user_id
@@ -79,9 +78,9 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
             "is_active": doc.get("is_active", True),
             "is_escalated": doc.get("is_escalated", True),
             "lethality_alert": doc.get("lethality_alert", False),
-            "created_at": doc.get("created_at").replace(tzinfo=timezone.utc) if doc.get("created_at") else None,
-            "updated_at": doc.get("updated_at").replace(tzinfo=timezone.utc) if doc.get("updated_at") else None,
-            "escalated_at": doc.get("escalated_at").replace(tzinfo=timezone.utc) if doc.get("escalated_at") else None,
+            "created_at": doc.get("created_at"),
+            "updated_at": doc.get("updated_at"),
+            "escalated_at": doc.get("escalated_at"),
         })
 
     formatted = [EscalatedSessionResponse(**s) for s in sessions]
@@ -102,9 +101,8 @@ async def get_escalated_session_messages(user_id: str, current_provider = Depend
     if not user_id.strip():
         raise HTTPException(status_code=400, detail="User ID is required.")
 
-    from app.core.database import get_database
     db = get_database()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed.")
 
     session_info = await db.sessions.find_one({"user_id": user_id}, sort=[("created_at", -1)])
@@ -145,9 +143,8 @@ async def close_escalated_session(user_id: str, current_provider = Depends(get_c
     if not user_id.strip():
         raise HTTPException(status_code=400, detail="User ID is required.")
 
-    from app.core.database import get_database
     db = get_database()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed.")
 
     try:
@@ -409,7 +406,6 @@ async def inactivity_watchdog():
                 
                 logger.warning(f"[WATCHDOG] Session '{session_id}' (User '{user_id}') inactive for 35 mins. Closing.")
                 
-                from app.core.database import get_database
                 db = get_database()
                 if db is not None:
                     await db.sessions.update_one(
@@ -476,13 +472,13 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
       ?role=human_counselor → for the admin dashboard
       ?counselor_name=...   → custom name shown in Android UI
     """
-    # 1. Extract Bearer token from header
+    # 1. Extract Bearer token from header or query param (?token=...)
     auth_header = websocket.headers.get("authorization", "")
-    if not auth_header.startswith("Bearer "):
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
+    if auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1].strip()
+    else:
+        token = websocket.query_params.get("token", "").strip()
 
-    token = auth_header.split(" ")[1].strip()
     if not token:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
@@ -519,9 +515,12 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
     # 4. For users: reject if no active escalation exists
     if role == "user":
         is_escalated = False
-        if db:
+        if db is not None:
             try:
-                session_doc = await db.sessions.find_one({"user_id": user_id, "is_escalated": True})
+                session_doc = await db.sessions.find_one(
+                    {"user_id": user_id, "is_escalated": True},
+                    sort=[("escalated_at", -1)],
+                )
                 is_escalated = bool(session_doc)
             except Exception as e:
                 logger.error(f"[WS] DB error checking escalation for user {user_id}: {e}")
@@ -540,9 +539,12 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
 
     # 5. For counselors: validate session assignment so only the routed counselor can join
     if role == "human_counselor":
-        if db:
+        if db is not None:
             try:
-                session_doc = await db.sessions.find_one({"user_id": user_id, "is_escalated": True})
+                session_doc = await db.sessions.find_one(
+                    {"user_id": user_id, "is_escalated": True},
+                    sort=[("escalated_at", -1)],
+                )
             except Exception as e:
                 logger.error(f"[WS] DB error fetching session for counselor on user {user_id}: {e}")
                 await websocket.close(code=1011, reason="Internal server error")
@@ -576,10 +578,14 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
             manager.start_timeout_task(user_id, task)
             logger.info(f"[WS] Started {COUNSELOR_TIMEOUT_SECONDS}s counselor timeout for room '{user_id}'")
 
+    # Initialised here so the finally block can always reference it safely,
+    # regardless of whether the counselor branch was entered.
+    heartbeat_task: Optional[asyncio.Task] = None
+
     # 8. Counselor: update presence, inject handoff brief, then broadcast join notice
     if role == "human_counselor":
         # Mark counselor online and increment their session counter
-        if db:
+        if db is not None:
             try:
                 await db.admins.update_one(
                     {"_id": ObjectId(authenticated_user_id)},
@@ -599,7 +605,7 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
         manager.cancel_timeout_task(user_id)
 
         # Inject handoff brief privately before the user-visible join notice
-        if session_doc and db:
+        if db is not None and session_doc is not None:
             handoff_summary = session_doc.get("handoff_summary")
             if not handoff_summary:
                 # Poll briefly — the LLM summarization task may still be running (~2-4s)
@@ -613,15 +619,19 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
                     except Exception:
                         break
 
+            await websocket.send_json({
+                "type": "system_handoff_brief",
+                "content": handoff_summary or (
+                    "Clinical summary is still being generated. "
+                    "Please review the chat history for context."
+                ),
+                "crisis_category": session_doc.get("crisis_category", "unknown"),
+                "summary_ready": bool(handoff_summary),
+            })
             if handoff_summary:
-                await websocket.send_json({
-                    "type": "system_handoff_brief",
-                    "content": handoff_summary,
-                    "crisis_category": session_doc.get("crisis_category", "unknown"),
-                })
                 logger.info(f"[WS] Handoff brief delivered to counselor {authenticated_user_id}.")
             else:
-                logger.warning(f"[WS] Handoff summary unavailable for session {actual_session_id}.")
+                logger.warning(f"[WS] Handoff summary unavailable for session {actual_session_id} — placeholder sent.")
 
         join_notice = {
             "role": "human_counselor",
@@ -632,8 +642,6 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
             "is_system": True,
         }
         await manager.broadcast(user_id, join_notice, websocket)
-
-    heartbeat_task: Optional[asyncio.Task] = None
 
     try:
         while True:
@@ -705,7 +713,7 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
         if heartbeat_task is not None:
             heartbeat_task.cancel()
 
-        if role == "human_counselor" and db:
+        if role == "human_counselor" and db is not None:
             # Decrement session counter, floored at 0 to prevent drift
             try:
                 await db.admins.update_one(

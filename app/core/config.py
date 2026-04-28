@@ -76,7 +76,7 @@ class Settings(BaseSettings):
         #     description="Must be set via SECRET_KEY environment variable"
         # )    
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 10080  # 7 days
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     class Config:

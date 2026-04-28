@@ -71,10 +71,16 @@ async def synthesize_consensus(text: str, roberta_emotion: str, roberta_score: f
             
     except Exception as e:
         logger.error(f"Consensus Synthesizer failed: {e}")
-        # Default fail-safe
+        # Conservative fail-safe: unknown safety state → treat as crisis.
+        # A false-positive escalation is recoverable; a false-negative during
+        # an API outage is not. The counselor can assess and dismiss if needed.
         return {
             "llm_sentiment": "unknown",
-            "category": "technical error",
-            "is_crisis": False,
-            "reasoning": "Fallback due to API error."
+            "category": "technical_error",
+            "is_crisis": True,
+            "intensity": "high",
+            "recommended_tone": "validating",
+            "message_class": "crisis",
+            "token_budget": 200,
+            "reasoning": "Safety check unavailable — escalating out of caution.",
         }

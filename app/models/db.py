@@ -11,36 +11,36 @@ class EmergencyContact(BaseModel):
 
 class UserModelDB(BaseModel):
     user_id: Optional[str] = None
-    name: Optional[str] = None
+
+    # FC4: first_name + last_name replace full_name for new registrations.
+    # full_name kept as Optional for backward compatibility with existing documents.
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    full_name: Optional[str] = None  # legacy field — do not write on new registrations
+
+    # FC5: demographic fields
     gender: Optional[str] = None
     age: Optional[int] = None
-    emergency_contact: Optional[EmergencyContact] = None
-    personality_answers: Optional[Dict[str, str]] = None   # raw answers from Android
-    personality_summary: Optional[str] = None               # computed human-readable string
 
-    # ── Authentication / admin fields ─────────────────────────────────────────
-    full_name: Optional[str] = None
+    name: Optional[str] = None
+    emergency_contact: Optional[EmergencyContact] = None
+    personality_answers: Optional[Dict[str, str]] = None
+    personality_summary: Optional[str] = None
+
+    # ── Authentication fields ─────────────────────────────────────────────────
     email: Optional[str] = None
     password_hash: Optional[str] = None
     phone_number: Optional[str] = None
+    # FC3: is_admin removed — role is determined by which collection the doc lives in.
     is_user: bool = True
-    is_admin: bool = False
-    professional_role: Optional[str] = None  # e.g., "Licensed Psychologist (PhD / PsyD)"
-    license_number: Optional[str] = None
-    state_of_licensure: Optional[str] = None
-    npi_number: Optional[str] = None
-    practice_type: Optional[str] = None  # e.g., "Private"
-    city: Optional[str] = None
-    state: Optional[str] = None
-    consultation_mode: Optional[str] = None  # e.g., "In-person"
-    is_active: bool = True  # Account status: True=active, False=disabled/suspended
+    is_active: bool = True
     last_login: Optional[datetime] = None
     password_reset_token: Optional[str] = None
     password_reset_expires: Optional[datetime] = None
 
     # ── Smart Routing ─────────────────────────────────────────────────────────
-    preferred_counselor_id: Optional[str] = None   # _id of the last trusted counselor
-    last_crisis_category: Optional[str] = None      # category from previous escalation
+    preferred_counselor_id: Optional[str] = None
+    last_crisis_category: Optional[str] = None
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_active: datetime = Field(default_factory=datetime.utcnow)
@@ -48,19 +48,26 @@ class UserModelDB(BaseModel):
 
 class AdminModelDB(BaseModel):
     user_id: str = ""
-    full_name: str
+    # FC4: first_name + last_name; full_name kept for backward compat
+    first_name: str = ""
+    last_name: str = ""
+    full_name: Optional[str] = None  # legacy
     email: str
     password_hash: str
     phone_number: str
     role: str = "admin"
-    professional_role: str
-    license_number: str
-    state_of_licensure: str
-    npi_number: str
-    practice_type: str
-    city: str
-    state: str
-    consultation_mode: str
+    # FC5: demographic fields
+    gender: Optional[str] = None
+    age: Optional[int] = None
+    # Professional credentials
+    professional_role: str = ""
+    license_number: str = ""
+    state_of_licensure: str = ""
+    npi_number: str = ""
+    practice_type: str = ""
+    city: str = ""
+    state: str = ""
+    consultation_mode: str = ""
     # ── Smart Routing — Presence & Capacity ──────────────────────────────────
     is_online: bool = False
     current_active_sessions: int = 0
@@ -81,9 +88,13 @@ class SessionModelDB(BaseModel):
     summary: Optional[str] = None
 
     # ── Smart Routing ─────────────────────────────────────────────────────────
-    assigned_counselor_id: Optional[str] = None    # _id string of the routed counselor
-    crisis_category: Optional[str] = None           # Groq consensus category at escalation time
-    handoff_summary: Optional[str] = None           # LLM-generated clinical brief for the counselor
+    assigned_counselor_id: Optional[str] = None
+    crisis_category: Optional[str] = None
+    handoff_summary: Optional[str] = None
+    # Fix 3: written atomically with the __routing__ lock for stale-lock detection
+    routing_started_at: Optional[datetime] = None
+    assigned_at: Optional[datetime] = None
+    assignment_complete: bool = False
 
 
 class RobertaAnalysis(BaseModel):
@@ -102,7 +113,7 @@ class LLMConsensus(BaseModel):
 
 class MessageModelDB(BaseModel):
     session_id: str
-    sender_type: str = "user"  # "user" or "doctor" or "assistant"
+    sender_type: str = "user"
     sender_id: str = ""
     turn_number: int = 1
     role: str

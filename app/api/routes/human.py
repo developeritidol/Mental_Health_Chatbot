@@ -1,20 +1,19 @@
 """
 Human Handoff — WebSocket Route + REST APIs
 ──────────────────────────────────────────────
-ws://host/ws/human/{user_id}
+ws://host/api/human/chat/{user_id}
 
-Two parties connect to the same session_id "room":
+Two parties connect to the same user_id "room":
   1. The Android user  (role = "user")
-  2. The Human Admin   (role = "human_counselor")
+  2. The Human Counselor (role = "human_counselor")
 
-Messages sent by either party are:
-  - Saved to MongoDB so history is preserved
-  - Broadcast in real-time to every other connection in the room
-
-REST APIs for Admin Dashboard:
-  GET  /ws/escalated                           — list all escalated sessions
-  GET  /ws/escalated/{user_id}/messages        — read history before joining
-  POST /ws/escalated/{user_id}/close           — end the session, return to AI
+Fix 9:  confirmed counselor ID written to session on WebSocket join.
+Fix 11: placeholder handoff brief sent immediately; background task delivers
+        the real summary once GPT-4o finishes (no hard 5-second deadline).
+Fix 12: mark_counselor_connected/disconnected maintain the connection registry.
+Fix 13: cancel_timeout_task called unconditionally in disconnect() to prevent
+        orphaned asyncio task leaks.
+Fix 15: unauthorized connections closed before websocket.accept() is called.
 """
 
 import json
@@ -26,10 +25,11 @@ from bson import ObjectId
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends, status
 from app.core.auth.JWTtoken import verify_token
 from app.core.database import get_database
+from app.core.connection_registry import mark_counselor_connected, mark_counselor_disconnected
 from app.services.db_service import (
     save_message,
     get_escalated_sessions,
-    get_user_messages,     
+    get_user_messages,
     close_escalation,
     close_escalation_by_user,
     get_existing_session,
@@ -47,18 +47,13 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/human", tags=["human"])
 
-# ── Fallback timeout (seconds) ────────────────────────────────────────────────
 COUNSELOR_TIMEOUT_SECONDS = 1200  # 20 minutes
 
 
-# ── REST APIs for Human Admin Dashboard ───────────────────────────────────────
+# ── REST APIs ─────────────────────────────────────────────────────────────────
 
 @router.get("/escalated", response_model=EscalatedSessionListResponse)
 async def list_escalated_sessions(user_id: Optional[str] = None, current_provider = Depends(get_current_user)):
-    """ 
-    Returns all sessions that have been flagged for human intervention.
-    Used by the Admin Dashboard to show the queue of users needing help.
-    """
     db = get_database()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -66,10 +61,10 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
     query = {"is_escalated": True}
     if user_id:
         query["user_id"] = user_id
-        
+
     cursor = db.sessions.find(query).sort("escalated_at", -1)
     docs = await cursor.to_list(length=None)
-    
+
     sessions = []
     for doc in docs:
         sessions.append({
@@ -84,20 +79,11 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
         })
 
     formatted = [EscalatedSessionResponse(**s) for s in sessions]
-    return EscalatedSessionListResponse(
-        status="success",
-        total=len(formatted),
-        sessions=formatted,
-    )
+    return EscalatedSessionListResponse(status="success", total=len(formatted), sessions=formatted)
 
 
 @router.get("/escalated/{user_id}/messages", response_model=ChatHistoryResponse)
 async def get_escalated_session_messages(user_id: str, current_provider = Depends(get_current_user)):
-    """
-    Returns the full chat history for a specific escalated session.
-    Allows the human counselor to read the conversation context
-    before joining the WebSocket to start the live chat.
-    """
     if not user_id.strip():
         raise HTTPException(status_code=400, detail="User ID is required.")
 
@@ -111,7 +97,6 @@ async def get_escalated_session_messages(user_id: str, current_provider = Depend
     else:
         cursor = db.messages.find({"session_id": session_info["session_id"]}).sort("timestamp", 1)
         docs = await cursor.to_list(length=None)
-        
         messages = []
         for doc in docs:
             if doc.get("content"):
@@ -120,26 +105,15 @@ async def get_escalated_session_messages(user_id: str, current_provider = Depend
                     "role": doc.get("role", "unknown"),
                     "content": doc.get("content", ""),
                     "timestamp": doc.get("timestamp").replace(tzinfo=timezone.utc) if doc.get("timestamp") else None,
-                    "user_id": user_id # map user_id back for existing schema support
+                    "user_id": user_id,
                 })
 
     formatted = [ChatMessageResponse(**msg) for msg in messages]
-
-    return ChatHistoryResponse(
-        status="success",
-        user_id=user_id,
-        total_messages=len(formatted),
-        messages=formatted,
-    )
+    return ChatHistoryResponse(status="success", user_id=user_id, total_messages=len(formatted), messages=formatted)
 
 
 @router.post("/escalated/{user_id}/close")
 async def close_escalated_session(user_id: str, current_provider = Depends(get_current_user)):
-    """
-    Called by the human counselor to end the intervention.
-    Flips is_escalated = False so the user's next message 
-    goes back to the AI automatically.
-    """
     if not user_id.strip():
         raise HTTPException(status_code=400, detail="User ID is required.")
 
@@ -164,17 +138,13 @@ async def close_escalated_session(user_id: str, current_provider = Depends(get_c
     if not success:
         raise HTTPException(status_code=500, detail="Failed to close escalation.")
 
-    # Cancel any pending counselor fallback timeouts since the session is closed
     manager.cancel_timeout_task(user_id)
 
-    # Clear user from ConnectionManager memory
     if user_id in manager.rooms:
         del manager.rooms[user_id]
     if user_id in manager.has_human:
         del manager.has_human[user_id]
-    logger.info(f"[MEMORY CLEANUP] Cleared user {user_id} from ConnectionManager memory")
 
-    # Notify everyone in the WebSocket room that the session is ending
     close_notice = {
         "role": "system",
         "text": "The counselor has ended this session. You will be connected back to AI support.",
@@ -200,13 +170,9 @@ async def close_escalated_session(user_id: str, current_provider = Depends(get_c
 
 class ConnectionManager:
     def __init__(self):
-        # { user_id: [WebSocket, ...] }
         self.rooms: dict[str, list[WebSocket]] = {}
-        # Track whether a human counselor has joined a room
         self.has_human: dict[str, bool] = {}
-        # Admin dashboard connections listening for new escalations
         self.dashboard_clients: set[WebSocket] = set()
-        # Track counselor fallback timeout tasks
         self.timeout_tasks: dict[str, asyncio.Task] = {}
 
     def start_timeout_task(self, user_id: str, task: asyncio.Task):
@@ -214,12 +180,11 @@ class ConnectionManager:
 
     def cancel_timeout_task(self, user_id: str):
         task = self.timeout_tasks.pop(user_id, None)
-        if task: 
+        if task:
             task.cancel()
 
     def remove_timeout_task(self, user_id: str):
-        if user_id in self.timeout_tasks:
-            del self.timeout_tasks[user_id]
+        self.timeout_tasks.pop(user_id, None)
 
     async def connect(self, user_id: str, ws: WebSocket):
         await ws.accept()
@@ -233,13 +198,15 @@ class ConnectionManager:
         return self.has_human.get(user_id, False)
 
     def disconnect(self, user_id: str, ws: WebSocket):
+        # Fix 13: cancel unconditionally — timeout tasks created before room registration
+        # (or when the room still has other connections) would otherwise leak.
+        self.cancel_timeout_task(user_id)
+
         if user_id in self.rooms:
             self.rooms[user_id] = [c for c in self.rooms[user_id] if c is not ws]
             if not self.rooms[user_id]:
                 del self.rooms[user_id]
                 self.has_human.pop(user_id, None)
-                # Clean up timeout task to prevent memory leak
-                self.cancel_timeout_task(user_id)
         logger.info(f"[WS] Connection closed from room '{user_id}'.")
 
     async def broadcast(self, user_id: str, payload: dict, sender_ws: WebSocket):
@@ -295,12 +262,6 @@ manager = ConnectionManager()
 # ── Counselor Fallback Timer ──────────────────────────────────────────────────
 
 async def _counselor_timeout_watchdog(user_id: str):
-    """
-    Runs as a background task after a user connects to a crisis room.
-    On timeout: attempts one re-route to a different available counselor first.
-    If no counselor can be found, sends the crisis hotline fallback message and
-    returns the user to AI mode.
-    """
     try:
         await asyncio.sleep(COUNSELOR_TIMEOUT_SECONDS)
     except asyncio.CancelledError:
@@ -322,11 +283,8 @@ async def _counselor_timeout_watchdog(user_id: str):
         if session_doc:
             actual_session_id = session_doc.get("session_id", user_id)
 
-    # Attempt a re-route: clear the stale assignment and try again with a different counselor.
-    # This handles the race where the originally assigned counselor went offline before joining.
     if db is not None and session_doc is not None:
         failed_counselor_id = session_doc.get("assigned_counselor_id")
-        # Reset assignment so route_crisis_session can claim the slot
         await db.sessions.update_one(
             {"session_id": actual_session_id},
             {"$set": {"assigned_counselor_id": None}},
@@ -334,23 +292,15 @@ async def _counselor_timeout_watchdog(user_id: str):
 
         from app.services.routing_service import route_crisis_session
         crisis_category = session_doc.get("crisis_category", "unknown")
-        logger.info(f"[TIMEOUT] Attempting re-route for session {actual_session_id}, excluding {failed_counselor_id}.")
+        logger.info(f"[TIMEOUT] Re-routing session {actual_session_id}, excluding {failed_counselor_id}.")
         reroute_consensus: dict = {"category": crisis_category, "is_crisis": True}
-        # Only pass the exclude hint if there is a real counselor ID to skip
         if failed_counselor_id:
             reroute_consensus["_exclude_counselor_id"] = failed_counselor_id
         asyncio.create_task(
-            route_crisis_session(
-                user_id=user_id,
-                session_id=actual_session_id,
-                consensus=reroute_consensus,
-            )
+            route_crisis_session(user_id=user_id, session_id=actual_session_id, consensus=reroute_consensus)
         )
-        # Give the re-route a moment to complete before deciding to serve the hotline message.
-        # The routing engine will insert its own hotline message if no counselor is found.
         return
 
-    # No session doc found — serve the hotline message directly and return user to AI
     fallback = {
         "role": "system",
         "text": (
@@ -365,13 +315,7 @@ async def _counselor_timeout_watchdog(user_id: str):
         "type": "counselor_unavailable",
     }
     await manager.send_to_all(user_id, fallback)
-
-    await save_message({
-        "session_id": actual_session_id,
-        "role": "system",
-        "content": fallback["text"],
-        "user_id": user_id,
-    })
+    await save_message({"session_id": actual_session_id, "role": "system", "content": fallback["text"], "user_id": user_id})
 
     if db is not None:
         await db.sessions.update_many(
@@ -384,71 +328,74 @@ async def _counselor_timeout_watchdog(user_id: str):
 # ── Global 35-Minute Inactivity Watchdog ──────────────────────────────────────
 
 async def inactivity_watchdog():
-    """
-    Runs globally in the background every 60 seconds.
-    Finds escalated sessions that haven't received a message in 35 minutes.
-    Closes the escalation, returns the user to AI, and forces the WebSocket tab to close.
-    """
     from app.services.db_service import get_expired_escalated_sessions
     logger.info("[WATCHDOG] Started 35-minute inactivity watchdog.")
-    
+
     while True:
         try:
-            # Check every 60 seconds
             await asyncio.sleep(60)
-            
-            # Fetch sessions inactive for 35+ minutes
             expired_sessions = await get_expired_escalated_sessions(timeout_minutes=35)
-            
+
             for expired_info in expired_sessions:
                 session_id = expired_info["session_id"]
                 user_id = expired_info.get("user_id", "unknown")
-                
                 logger.warning(f"[WATCHDOG] Session '{session_id}' (User '{user_id}') inactive for 35 mins. Closing.")
-                
+
                 db = get_database()
                 if db is not None:
                     await db.sessions.update_one(
                         {"session_id": session_id},
                         {"$set": {"is_escalated": False, "escalation_closed_at": datetime.now(timezone.utc)}}
                     )
-                
+
                 timeout_msg = {
                     "role": "system",
                     "text": "This live session has been closed due to inactivity. You will now be returned to AI support.",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "is_human": False,
                     "is_system": True,
-                    "type": "session_inactive"
+                    "type": "session_inactive",
                 }
-
-                # Save the system message in DB
-                await save_message({
-                    "session_id": session_id,
-                    "role": "system",
-                    "content": timeout_msg["text"],
-                    "user_id": user_id,
-                })
-
+                await save_message({"session_id": session_id, "role": "system", "content": timeout_msg["text"], "user_id": user_id})
                 await manager.send_to_all(user_id, timeout_msg)
 
         except Exception as e:
             logger.error(f"[WATCHDOG] Error in loop: {e}")
 
 
-# ── WebSocket Endpoint ────────────────────────────────────────────────────────
+# ── Handoff Summary Background Delivery (Fix 11) ─────────────────────────────
+
+async def _deliver_handoff_when_ready(ws: WebSocket, session_id: str, db) -> None:
+    """
+    Fix 11: delivers the GPT-4o handoff summary to the counselor's WebSocket
+    as soon as it is written to the DB, regardless of how long generation takes.
+    Polls every 10 seconds for up to 5 minutes before giving up.
+    """
+    for _ in range(30):  # 30 × 10s = 5 minutes max
+        await asyncio.sleep(10)
+        try:
+            doc = await db.sessions.find_one({"session_id": session_id})
+            summary = (doc or {}).get("handoff_summary")
+            if summary:
+                await ws.send_json({
+                    "type": "system_handoff_brief_ready",
+                    "content": summary,
+                    "crisis_category": (doc or {}).get("crisis_category", "unknown"),
+                    "summary_ready": True,
+                })
+                logger.info(f"[WS] Delayed handoff summary delivered for session {session_id}.")
+                return
+        except Exception:
+            return  # WebSocket closed or DB error — stop silently
+
+
+# ── Dashboard WebSocket ───────────────────────────────────────────────────────
 
 @router.websocket("/escalated/ws")
 async def dashboard_notifications_ws(websocket: WebSocket):
-    """
-    Global WebSocket for the Admin Dashboard.
-    Listens for real-time events like 'new_escalation' so the frontend
-    can dynamically update without a full page reload.
-    """
     await manager.connect_dashboard(websocket)
     try:
         while True:
-            # Keep connection alive; clients mostly just listen
             data = await websocket.receive_text()
             if data == "ping":
                 await websocket.send_text("pong")
@@ -459,20 +406,19 @@ async def dashboard_notifications_ws(websocket: WebSocket):
         manager.disconnect_dashboard(websocket)
 
 
+# ── Human Chat WebSocket ──────────────────────────────────────────────────────
+
 @router.websocket("/chat/{user_id}")
 async def human_chat_ws(websocket: WebSocket, user_id: str):
     """
     Real-time human handoff endpoint.
-
-    Headers required:
-      Authorization: Bearer <token>
-
-    Query params accepted (optional):
-      ?role=user            → for the Android user
-      ?role=human_counselor → for the admin dashboard
-      ?counselor_name=...   → custom name shown in Android UI
+    Query params:
+      ?token=<jwt>          token (fallback when Authorization header unavailable)
+      ?role=user            Android user
+      ?role=human_counselor counselor dashboard
+      ?counselor_name=...   display name shown in Android UI
     """
-    # 1. Extract Bearer token from header or query param (?token=...)
+    # 1. Extract token from header or query param
     auth_header = websocket.headers.get("authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header.split(" ")[1].strip()
@@ -480,6 +426,7 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
         token = websocket.query_params.get("token", "").strip()
 
     if not token:
+        # Fix 15: close at handshake layer — no accept()
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -489,7 +436,7 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-    # 2. Verify token BEFORE accepting — drops the connection at handshake if invalid
+    # 2. Verify token BEFORE accepting the WebSocket handshake
     try:
         token_data = await verify_token(token, credentials_exception)
     except HTTPException:
@@ -500,19 +447,18 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
     role = websocket.query_params.get("role", "user")
     counselor_name = websocket.query_params.get("counselor_name", "Crisis Support Team")
 
-    # 3. For users: the URL user_id must match the token identity
+    # 3. Identity check: user URL must match JWT
     if role == "user" and authenticated_user_id != user_id:
-        logger.warning(
-            f"[WS SECURITY] User {authenticated_user_id} attempted to access room for user {user_id}"
-        )
+        logger.warning(f"[WS SECURITY] User {authenticated_user_id} attempted room for user {user_id}")
+        # Fix 15: close before accept
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
     db = get_database()
     session_doc: Optional[dict] = None
-    actual_session_id = user_id  # resolved to a proper session_id once we have session_doc
+    actual_session_id = user_id
 
-    # 4. For users: reject if no active escalation exists
+    # 4. User path: verify active escalation exists for this user
     if role == "user":
         is_escalated = False
         if db is not None:
@@ -529,15 +475,11 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
 
         if not is_escalated:
             logger.warning(f"[WS REJECT] Non-escalated user {user_id} attempted handoff connection.")
-            await websocket.accept()
-            await websocket.send_json({
-                "type": "error",
-                "message": "This user is not authorized for human handoff.",
-            })
+            # Fix 15: reject at handshake layer
             await websocket.close(code=4003)
             return
 
-    # 5. For counselors: validate session assignment so only the routed counselor can join
+    # 5. Counselor path: validate session assignment
     if role == "human_counselor":
         if db is not None:
             try:
@@ -553,38 +495,34 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
         if session_doc:
             actual_session_id = session_doc.get("session_id", user_id)
             assigned = session_doc.get("assigned_counselor_id")
-            # Reject if the routing engine assigned this session to a different counselor
+            # Reject if routed to a different counselor
             if assigned and assigned not in (None, "__routing__") and assigned != authenticated_user_id:
                 logger.warning(
                     f"[WS SECURITY] Counselor {authenticated_user_id} unauthorised for session "
                     f"{actual_session_id} (assigned: {assigned})."
                 )
-                await websocket.accept()
-                await websocket.send_json({
-                    "type": "error",
-                    "message": "Not authorised for this session.",
-                })
-                await websocket.close(code=4003, reason="Not authorised for this session")
+                # Fix 15: reject at handshake layer
+                await websocket.close(code=4003)
                 return
 
-    # 6. Accept the WebSocket and register with the connection manager
+    # 6. Accept WebSocket and register
     await manager.connect(user_id, websocket)
     logger.info(f"[WS] Role '{role}' joined room '{user_id}'")
 
-    # 7. User: start the fallback counselor timeout watchdog
+    # 7. User: start fallback timeout watchdog
     if role == "user":
         if user_id not in manager.timeout_tasks:
             task = asyncio.create_task(_counselor_timeout_watchdog(user_id))
             manager.start_timeout_task(user_id, task)
             logger.info(f"[WS] Started {COUNSELOR_TIMEOUT_SECONDS}s counselor timeout for room '{user_id}'")
 
-    # Initialised here so the finally block can always reference it safely,
-    # regardless of whether the counselor branch was entered.
     heartbeat_task: Optional[asyncio.Task] = None
 
-    # 8. Counselor: update presence, inject handoff brief, then broadcast join notice
+    # 8. Counselor: update presence, write confirmed session assignment, send handoff brief
     if role == "human_counselor":
-        # Mark counselor online and increment their session counter
+        # Fix 12: register in connection registry for routing availability check
+        mark_counselor_connected(authenticated_user_id)
+
         if db is not None:
             try:
                 await db.admins.update_one(
@@ -597,41 +535,40 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
             except Exception as e:
                 logger.warning(f"[WS] Could not update presence for counselor {authenticated_user_id}: {e}")
 
-        # Heartbeat: keeps last_ping fresh while the WebSocket is open.
-        # Stored so the finally block can cancel it on disconnect.
+            # Fix 9: write the confirmed counselor ID — replaces __routing__ placeholder
+            if session_doc is not None:
+                try:
+                    await db.sessions.update_one(
+                        {"session_id": actual_session_id},
+                        {"$set": {"assigned_counselor_id": authenticated_user_id}},
+                    )
+                    logger.info(f"[WS] Confirmed counselor {authenticated_user_id} written to session {actual_session_id}.")
+                except Exception as e:
+                    logger.warning(f"[WS] Could not confirm counselor ID for session {actual_session_id}: {e}")
+
         heartbeat_task = asyncio.create_task(_counselor_heartbeat(authenticated_user_id))
 
         manager.mark_human_joined(user_id)
         manager.cancel_timeout_task(user_id)
 
-        # Inject handoff brief privately before the user-visible join notice
+        # Fix 11: send placeholder immediately; start background task to push real summary
         if db is not None and session_doc is not None:
             handoff_summary = session_doc.get("handoff_summary")
-            if not handoff_summary:
-                # Poll briefly — the LLM summarization task may still be running (~2-4s)
-                for _ in range(5):
-                    await asyncio.sleep(1)
-                    try:
-                        refreshed = await db.sessions.find_one({"session_id": actual_session_id})
-                        handoff_summary = (refreshed or {}).get("handoff_summary")
-                        if handoff_summary:
-                            break
-                    except Exception:
-                        break
 
             await websocket.send_json({
                 "type": "system_handoff_brief",
                 "content": handoff_summary or (
-                    "Clinical summary is still being generated. "
-                    "Please review the chat history for context."
+                    "Clinical summary is being generated — you will receive it shortly."
                 ),
                 "crisis_category": session_doc.get("crisis_category", "unknown"),
                 "summary_ready": bool(handoff_summary),
             })
+
             if handoff_summary:
-                logger.info(f"[WS] Handoff brief delivered to counselor {authenticated_user_id}.")
+                logger.info(f"[WS] Handoff brief delivered immediately to counselor {authenticated_user_id}.")
             else:
-                logger.warning(f"[WS] Handoff summary unavailable for session {actual_session_id} — placeholder sent.")
+                logger.info(f"[WS] Placeholder sent; launching background delivery task for session {actual_session_id}.")
+                asyncio.create_task(_deliver_handoff_when_ready(websocket, actual_session_id, db))
 
         join_notice = {
             "role": "human_counselor",
@@ -676,7 +613,6 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
                 "done": True,
             }
 
-            # Resolve the session_id once per message (cheap find with sort index)
             msg_session_id = actual_session_id
             if db and msg_session_id == user_id:
                 session_info = await db.sessions.find_one(
@@ -694,7 +630,6 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
             })
 
             await manager.broadcast(user_id, payload, websocket)
-
             ack = {**payload, "sent": True}
             await websocket.send_text(json.dumps(ack))
 
@@ -713,39 +648,41 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
         if heartbeat_task is not None:
             heartbeat_task.cancel()
 
-        if role == "human_counselor" and db is not None:
-            # Decrement session counter, floored at 0 to prevent drift
-            try:
-                await db.admins.update_one(
-                    {"_id": ObjectId(authenticated_user_id), "current_active_sessions": {"$gt": 0}},
-                    {"$inc": {"current_active_sessions": -1}},
-                )
-                updated_admin = await db.admins.find_one({"_id": ObjectId(authenticated_user_id)})
-                if updated_admin and updated_admin.get("current_active_sessions", 0) <= 0:
-                    await db.admins.update_one(
-                        {"_id": ObjectId(authenticated_user_id)},
-                        {"$set": {"is_online": False, "current_active_sessions": 0}},
-                    )
-            except Exception as e:
-                logger.error(f"[WS] Failed to clean up presence for counselor {authenticated_user_id}: {e}")
+        if role == "human_counselor":
+            # Fix 12: remove from connection registry on disconnect
+            mark_counselor_disconnected(authenticated_user_id)
 
-            # Mark the session resolved so the user's next message goes back to the AI
-            if actual_session_id != user_id:
+            if db is not None:
                 try:
-                    await db.sessions.update_one(
-                        {"session_id": actual_session_id},
-                        {"$set": {
-                            "is_escalated": False,
-                            "escalation_closed_at": datetime.now(timezone.utc),
-                            "updated_at": datetime.now(timezone.utc),
-                        }},
+                    await db.admins.update_one(
+                        {"_id": ObjectId(authenticated_user_id), "current_active_sessions": {"$gt": 0}},
+                        {"$inc": {"current_active_sessions": -1}},
                     )
+                    updated_admin = await db.admins.find_one({"_id": ObjectId(authenticated_user_id)})
+                    if updated_admin and updated_admin.get("current_active_sessions", 0) <= 0:
+                        await db.admins.update_one(
+                            {"_id": ObjectId(authenticated_user_id)},
+                            {"$set": {"is_online": False, "current_active_sessions": 0}},
+                        )
                 except Exception as e:
-                    logger.error(f"[WS] Failed to close escalation for session {actual_session_id}: {e}")
+                    logger.error(f"[WS] Failed to clean up presence for counselor {authenticated_user_id}: {e}")
+
+                if actual_session_id != user_id:
+                    try:
+                        await db.sessions.update_one(
+                            {"session_id": actual_session_id},
+                            {"$set": {
+                                "is_escalated": False,
+                                "escalation_closed_at": datetime.now(timezone.utc),
+                                "updated_at": datetime.now(timezone.utc),
+                            }},
+                        )
+                    except Exception as e:
+                        logger.error(f"[WS] Failed to close escalation for session {actual_session_id}: {e}")
 
 
 async def _counselor_heartbeat(counselor_id: str) -> None:
-    """Updates last_ping every 20 seconds. Cancelled explicitly in the finally block on disconnect."""
+    """Updates last_ping every 20 seconds. Cancelled in the finally block on disconnect."""
     db = get_database()
     if db is None:
         return
@@ -757,6 +694,6 @@ async def _counselor_heartbeat(counselor_id: str) -> None:
                 {"$set": {"last_ping": datetime.now(timezone.utc)}},
             )
     except asyncio.CancelledError:
-        pass  # Normal shutdown path — task was cancelled by the finally block
+        pass
     except Exception as e:
         logger.warning(f"[HEARTBEAT] Stopped for counselor {counselor_id}: {e}")

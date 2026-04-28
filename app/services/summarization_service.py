@@ -76,34 +76,42 @@ async def generate_clinical_handoff(
 
 async def _fetch_past_session_context(db, user_id: str) -> str:
     """Returns a formatted transcript from the user's last resolved escalation."""
-    past_session = await db.sessions.find_one(
-        {
-            "user_id": user_id,
-            "is_escalated": False,
-            "assigned_counselor_id": {"$ne": None},
-        },
-        sort=[("created_at", -1)],
-    )
+    try:
+        past_session = await db.sessions.find_one(
+            {
+                "user_id": user_id,
+                "is_escalated": False,
+                "assigned_counselor_id": {"$ne": None},
+            },
+            sort=[("created_at", -1)],
+        )
 
-    if not past_session:
+        if not past_session:
+            return "No prior escalation history found."
+
+        cursor = db.messages.find(
+            {"session_id": past_session["session_id"]},
+            sort=[("timestamp", 1)],
+        )
+        messages = await cursor.to_list(length=30)
+        return _format_messages(messages) or "No prior escalation history found."
+    except Exception as e:
+        logger.error(f"[SUMMARIZATION] Past context fetch failed for user {user_id}: {e}")
         return "No prior escalation history found."
-
-    cursor = db.messages.find(
-        {"session_id": past_session["session_id"]},
-        sort=[("timestamp", 1)],
-    )
-    messages = await cursor.to_list(length=30)
-    return _format_messages(messages) or "No prior escalation history found."
 
 
 async def _fetch_current_session_context(db, session_id: str) -> str:
     """Returns a formatted transcript of the current AI conversation."""
-    cursor = db.messages.find(
-        {"session_id": session_id},
-        sort=[("timestamp", 1)],
-    )
-    messages = await cursor.to_list(length=20)
-    return _format_messages(messages) or "No messages in current session."
+    try:
+        cursor = db.messages.find(
+            {"session_id": session_id},
+            sort=[("timestamp", 1)],
+        )
+        messages = await cursor.to_list(length=20)
+        return _format_messages(messages) or "No messages in current session."
+    except Exception as e:
+        logger.error(f"[SUMMARIZATION] Current context fetch failed for session {session_id}: {e}")
+        return "No messages in current session."
 
 
 def _format_messages(messages: list) -> str:

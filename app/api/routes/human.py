@@ -478,52 +478,52 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
     session_doc: Optional[dict] = None
     actual_session_id = user_id
 
-    # 4. User path: verify active escalation exists for this user
-    if role == "user":
-        is_escalated = False
-        if db is not None:
-            try:
-                session_doc = await db.sessions.find_one(
-                    {"user_id": user_id, "is_escalated": True},
-                    sort=[("escalated_at", -1)],
-                )
-                is_escalated = bool(session_doc)
-            except Exception as e:
-                logger.error(f"[WS] DB error checking escalation for user {user_id}: {e}")
-                await websocket.close(code=1011, reason="Internal server error")
-                return
+    # # 4. User path: verify active escalation exists for this user
+    # if role == "user":
+    #     is_escalated = False
+    #     if db is not None:
+    #         try:
+    #             session_doc = await db.sessions.find_one(
+    #                 {"user_id": user_id, "is_escalated": True},
+    #                 sort=[("escalated_at", -1)],
+    #             )
+    #             is_escalated = bool(session_doc)
+    #         except Exception as e:
+    #             logger.error(f"[WS] DB error checking escalation for user {user_id}: {e}")
+    #             await websocket.close(code=1011, reason="Internal server error")
+    #             return
 
-        if not is_escalated:
-            logger.warning(f"[WS REJECT] Non-escalated user {user_id} attempted handoff connection.")
-            # Fix 15: reject at handshake layer
-            await websocket.close(code=4003)
-            return
+    #     if not is_escalated:
+    #         logger.warning(f"[WS REJECT] Non-escalated user {user_id} attempted handoff connection.")
+    #         # Fix 15: reject at handshake layer
+    #         await websocket.close(code=4003)
+    #         return
 
-    # 5. Counselor path: validate session assignment
-    if role == "human_counselor":
-        if db is not None:
-            try:
-                session_doc = await db.sessions.find_one(
-                    {"user_id": user_id, "is_escalated": True},
-                    sort=[("escalated_at", -1)],
-                )
-            except Exception as e:
-                logger.error(f"[WS] DB error fetching session for counselor on user {user_id}: {e}")
-                await websocket.close(code=1011, reason="Internal server error")
-                return
+    # # 5. Counselor path: validate session assignment
+    # if role == "human_counselor":
+    #     if db is not None:
+    #         try:
+    #             session_doc = await db.sessions.find_one(
+    #                 {"user_id": user_id, "is_escalated": True},
+    #                 sort=[("escalated_at", -1)],
+    #             )
+    #         except Exception as e:
+    #             logger.error(f"[WS] DB error fetching session for counselor on user {user_id}: {e}")
+    #             await websocket.close(code=1011, reason="Internal server error")
+    #             return
 
-        if session_doc:
-            actual_session_id = session_doc.get("session_id", user_id)
-            assigned = session_doc.get("assigned_counselor_id")
-            # Reject if routed to a different counselor
-            if assigned and assigned not in (None, "__routing__") and assigned != authenticated_user_id:
-                logger.warning(
-                    f"[WS SECURITY] Counselor {authenticated_user_id} unauthorised for session "
-                    f"{actual_session_id} (assigned: {assigned})."
-                )
-                # Fix 15: reject at handshake layer
-                await websocket.close(code=4003)
-                return
+    #     if session_doc:
+    #         actual_session_id = session_doc.get("session_id", user_id)
+    #         assigned = session_doc.get("assigned_counselor_id")
+    #         # Reject if routed to a different counselor
+    #         if assigned and assigned not in (None, "__routing__") and assigned != authenticated_user_id:
+    #             logger.warning(
+    #                 f"[WS SECURITY] Counselor {authenticated_user_id} unauthorised for session "
+    #                 f"{actual_session_id} (assigned: {assigned})."
+    #             )
+    #             # Fix 15: reject at handshake layer
+    #             await websocket.close(code=4003)
+    #             return
 
     # 6. Accept WebSocket and register
     await manager.connect(user_id, websocket)

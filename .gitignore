@@ -25,3 +25,5 @@ Md\ files/
 pytest.ini
 requirements-test.txt
 tests/test_auth_and_sessions.py
+.pytest_cache/
+tests/test_crisis_escalation_routing.py

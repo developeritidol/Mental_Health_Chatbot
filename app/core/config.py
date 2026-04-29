@@ -61,9 +61,13 @@ class Settings(BaseSettings):
     # This value is a safety fallback ONLY — never used for normal chat flow.
     MAX_TOKENS: int = 300
 
-    # ── Server address (used to build WebSocket URLs) ─────────────────────────
-    SERVER_HOST: str = "localhost"
+    # ── Server address ────────────────────────────────────────────────────────
+    # SERVER_HOST is the binding address for uvicorn (0.0.0.0 = all interfaces).
+    # SERVER_PUBLIC_HOST is the address clients use to connect (real IP or domain).
+    # These MUST be different when running on a remote server.
+    SERVER_HOST: str = "0.0.0.0"
     SERVER_PORT: int = 8000
+    SERVER_PUBLIC_HOST: str = "localhost"  # override in .env with actual IP or domain
 
     # ── JWT Authentication ────────────────────────────────────────────────────
     SECRET_KEY: str = Field(

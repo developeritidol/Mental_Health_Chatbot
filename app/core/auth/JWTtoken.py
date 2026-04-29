@@ -76,7 +76,7 @@ async def verify_refresh_token(token: str, credentials_exception):
             algorithms=[settings.ALGORITHM]
         )
 
-        useremail = payload.get("sub")
+        email = payload.get("sub")
         user_id = payload.get("user_id")
         token_type = payload.get("type")
         role = payload.get("role")
@@ -87,7 +87,7 @@ async def verify_refresh_token(token: str, credentials_exception):
 
         token_data = TokenData(
             user_id=user_id,
-            email=useremail,
+            email=email,
             role=role
         )
 

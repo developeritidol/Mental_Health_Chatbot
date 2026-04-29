@@ -105,6 +105,8 @@ class UserCreateRequest(BaseModel):
                 missing.append("emergency_contact_name")
             if not self.emergency_contact_relation:
                 missing.append("emergency_contact_relation")
+            if not self.emergency_contact_phone:
+                missing.append("emergency_contact_phone")
             if missing:
                 raise ValueError(
                     f"Patient registration requires: {', '.join(missing)}"

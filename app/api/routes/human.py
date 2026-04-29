@@ -343,10 +343,30 @@ async def inactivity_watchdog():
 
                 db = get_database()
                 if db is not None:
+                    session_doc = await db.sessions.find_one({"session_id": session_id})
+                    counselor_id = (session_doc or {}).get("assigned_counselor_id")
+
                     await db.sessions.update_one(
                         {"session_id": session_id},
                         {"$set": {"is_escalated": False, "escalation_closed_at": datetime.now(timezone.utc)}}
                     )
+
+                    # Free the counselor's capacity slot so they can accept new patients
+                    if counselor_id and counselor_id != "__routing__":
+                        try:
+                            await db.admins.update_one(
+                                {"_id": ObjectId(counselor_id), "current_active_sessions": {"$gt": 0}},
+                                {"$inc": {"current_active_sessions": -1}},
+                            )
+                            updated_admin = await db.admins.find_one({"_id": ObjectId(counselor_id)})
+                            if updated_admin and updated_admin.get("current_active_sessions", 0) <= 0:
+                                await db.admins.update_one(
+                                    {"_id": ObjectId(counselor_id)},
+                                    {"$set": {"is_online": False, "current_active_sessions": 0}},
+                                )
+                            logger.info(f"[WATCHDOG] Freed capacity slot for counselor {counselor_id}.")
+                        except Exception as e:
+                            logger.error(f"[WATCHDOG] Failed to free capacity for counselor {counselor_id}: {e}")
 
                 timeout_msg = {
                     "role": "system",

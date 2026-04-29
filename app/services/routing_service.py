@@ -113,6 +113,10 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
     """
     Main routing orchestrator. Always called via asyncio.create_task() so it
     never blocks the SSE stream.
+
+    Uses the doctor_user_assignments collection for Tier 1 sticky routing and
+    persists new assignments via MongoDB transactions to prevent data
+    inconsistency on server crash.
     """
     db = get_database()
     if db is None:
@@ -150,7 +154,9 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
         assigned_counselor: Optional[dict] = None
         preferred_id: Optional[str] = None
 
-        # ── Tier 1: Sticky Routing ───────────────────────────────────────────
+        # ── Tier 1: Sticky Routing (via doctor_user_assignments table) ────────
+        # Look up the user's currently active doctor from the assignment table
+        # instead of the legacy preferred_counselor_id field on the user doc.
         try:
             user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
         except Exception:
@@ -163,13 +169,20 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
             )
             return
 
-        preferred_id = user_doc.get("preferred_counselor_id")
+        active_assignment = await db.doctor_user_assignments.find_one(
+            {"user_id": user_id, "status": "active"}
+        )
+        if active_assignment:
+            preferred_id = active_assignment.get("doctor_id")
 
         if preferred_id and preferred_id == force_exclude_id:
             preferred_id = None
 
         if preferred_id:
-            preferred_doc = await db.admins.find_one({"_id": ObjectId(preferred_id)})
+            try:
+                preferred_doc = await db.admins.find_one({"_id": ObjectId(preferred_id)})
+            except Exception:
+                preferred_doc = None
             if preferred_doc:
                 # ── Tier 2: Context Match ────────────────────────────────────
                 if _categories_match(crisis_category, user_doc.get("last_crisis_category")):
@@ -191,16 +204,30 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
                 {"session_id": session_id},
                 {"$set": {"assigned_counselor_id": None, "routing_started_at": None}},
             )
+            hotline_text = (
+                "We're sorry, no counselors are available right now. "
+                "If you are in immediate danger, please call the National Crisis Helpline: 988."
+            )
             await db.messages.insert_one({
                 "session_id": session_id,
                 "role": "system",
                 "sender_type": "system",
-                "content": (
-                    "We're sorry, no counselors are available right now. "
-                    "If you are in immediate danger, please call the National Crisis Helpline: 988."
-                ),
+                "content": hotline_text,
                 "timestamp": datetime.now(timezone.utc),
             })
+            # Push immediately to the user's open WebSocket room so they don't wait 20 minutes
+            try:
+                from app.api.routes.human import manager as ws_manager
+                await ws_manager.send_to_all(user_id, {
+                    "role": "system",
+                    "text": hotline_text,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "is_human": False,
+                    "is_system": True,
+                    "type": "counselor_unavailable",
+                })
+            except Exception:
+                pass
             return
 
         counselor_id_str = str(assigned_counselor["_id"])
@@ -217,12 +244,29 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
             }},
         )
 
+        # ── Persist to doctor_user_assignments (transactional swap) ───────────
+        # If the selected counselor is different from the current active one,
+        # we must atomically deactivate the old record and insert a new one.
+        # If the same counselor is being reused, no changes to the table needed.
+        is_same_counselor = (preferred_id == counselor_id_str) if preferred_id else False
+
+        if not is_same_counselor:
+            await _swap_assignment(db, user_id, counselor_id_str)
+
+        # ── Determine Handoff Mode ────────────────────────────────────────────
+        if active_assignment is None:
+            handoff_mode = "raw_history"
+        elif is_same_counselor:
+            handoff_mode = "short_summary"
+        else:
+            handoff_mode = "comprehensive_summary"
+
         # ── Generate handoff summary in background ────────────────────────────
         asyncio.create_task(
-            _run_summarization_and_save(user_id, session_id, crisis_category)
+            _run_summarization_and_save(user_id, session_id, crisis_category, handoff_mode)
         )
 
-        # ── Update user's routing profile for next escalation ─────────────────
+        # ── Update user's routing profile (legacy compat + Tier 2 context) ────
         try:
             await db.users.update_one(
                 {"_id": ObjectId(user_id)},
@@ -252,19 +296,80 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
             pass
 
 
+
 # ── Internal helpers ──────────────────────────────────────────────────────────
+
+async def _swap_assignment(db, user_id: str, new_doctor_id: str) -> None:
+    """
+    Atomically swap the user's active doctor assignment using a MongoDB
+    transaction.  Steps inside the transaction:
+      1. Mark any existing active assignment as inactive.
+      2. Insert a new assignment with status=active.
+
+    If transactions are not supported (standalone MongoDB without a replica set),
+    the operations run sequentially — the unique partial index on
+    (user_id + status: active) still prevents duplicate active records.
+    """
+    now = datetime.now(timezone.utc)
+
+    async def _do_swap(session=None):
+        # Step 1: deactivate old assignment (if any)
+        await db.doctor_user_assignments.update_many(
+            {"user_id": user_id, "status": "active"},
+            {"$set": {"status": "inactive"}},
+            session=session,
+        )
+        # Step 2: insert new active assignment
+        await db.doctor_user_assignments.insert_one(
+            {
+                "user_id": user_id,
+                "doctor_id": new_doctor_id,
+                "assigned_at": now,
+                "status": "active",
+            },
+            session=session,
+        )
+
+    try:
+        # Attempt a proper transaction (requires replica set)
+        async with await db.client.start_session() as session:
+            async with session.start_transaction():
+                await _do_swap(session=session)
+        logger.info(
+            f"[ROUTING] Assignment swapped transactionally: "
+            f"user {user_id} → doctor {new_doctor_id}."
+        )
+    except Exception as txn_err:
+        # Standalone MongoDB or network issue — fall back to sequential ops.
+        # The unique partial index still prevents duplicate active records.
+        logger.warning(
+            f"[ROUTING] Transaction unavailable ({txn_err}). "
+            f"Falling back to sequential assignment swap."
+        )
+        try:
+            await _do_swap(session=None)
+            logger.info(
+                f"[ROUTING] Assignment swapped (non-transactional): "
+                f"user {user_id} → doctor {new_doctor_id}."
+            )
+        except Exception:
+            logger.exception(
+                f"[ROUTING] Failed to persist assignment for user {user_id}."
+            )
+
 
 async def _run_summarization_and_save(
     user_id: str,
     session_id: str,
     crisis_category: str,
+    handoff_mode: str = "comprehensive_summary",
 ) -> None:
     """Generates the clinical handoff note and persists it to the session doc."""
     try:
         db = get_database()
         if db is None:
             return
-        summary = await generate_clinical_handoff(user_id, session_id, crisis_category)
+        summary = await generate_clinical_handoff(user_id, session_id, crisis_category, handoff_mode)
         await db.sessions.update_one(
             {"session_id": session_id},
             {"$set": {"handoff_summary": summary}},

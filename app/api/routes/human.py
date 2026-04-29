@@ -486,24 +486,15 @@ async def _notify_assigned_counselor_user_waiting(
 
     if assigned_counselor_id and assigned_counselor_id != "__routing__":
         payload["counselor_id"] = assigned_counselor_id
-        delivered = await manager.notify_counselor(assigned_counselor_id, payload)
-        if delivered:
-            logger.info(
-                f"[NOTIFY] ✓ Targeted push sent | counselor={assigned_counselor_id}"
-                f" | type=user_waiting_in_room | room={user_id}"
-            )
-        else:
-            # Counselor's dashboard WS not in targeted registry — fall back to broadcast
-            await manager.broadcast_to_dashboard(payload)
-            logger.warning(
-                f"[NOTIFY] ⚠  Counselor {assigned_counselor_id} not in counselor_ws — broadcast fallback used"
-            )
-    else:
-        # No assignment yet (race condition) — broadcast so no counselor misses it
-        await manager.broadcast_to_dashboard(payload)
-        logger.warning(
-            f"[NOTIFY] ⚠  No assigned counselor found for room={user_id} — broadcast fallback used"
-        )
+
+    # Always broadcast to ALL dashboard clients so the admin panel receives the event.
+    # notify_counselor() only reaches counselor_ws[id] — admin panel is in dashboard_clients
+    # but not in counselor_ws, so it was silently skipped when targeted delivery succeeded.
+    await manager.broadcast_to_dashboard(payload)
+    logger.info(
+        f"[NOTIFY] ✓ Broadcast sent | type=user_waiting_in_room | room={user_id}"
+        f" | counselor={assigned_counselor_id or 'unassigned'}"
+    )
 
 
 # ── Handoff Summary Background Delivery (Fix 11) ─────────────────────────────

@@ -5,11 +5,19 @@ Implements the 3-tier routing decision engine for crisis escalations:
 
   Tier 1 — Sticky Routing:    Route to the user's preferred (last trusted) counselor.
   Tier 2 — Context Match:     Verify the crisis category is compatible with past history.
-  Tier 3 — Availability Gate: Confirm the counselor is online and has remaining capacity.
+  Tier 3 — Availability Gate: Confirm the counselor is online, has a fresh heartbeat,
+                               has remaining capacity, AND has an active WebSocket on
+                               this server process (connection_registry check).
 
 Falls back to a pool-based search if any tier fails.
 Always dispatches an LLM-generated clinical handoff summary as a background task
 so the counselor is pre-briefed before the user-visible chat begins.
+
+Fix 3:  atomic routing lock now also writes routing_started_at timestamp.
+Fix 14: stale __routing__ locks older than 5 minutes are cleaned up before each
+        routing attempt so a server crash cannot permanently block a session.
+Fix 12: _is_available() now also checks connection_registry.is_counselor_connected()
+        so a counselor with a stale is_online flag but no active WebSocket is not routed to.
 
 Entry point: route_crisis_session() — called via asyncio.create_task() from chat.py.
 """
@@ -22,13 +30,13 @@ from typing import Optional
 from bson import ObjectId
 
 from app.core.database import get_database
+from app.core.connection_registry import is_counselor_connected
 from app.services.summarization_service import generate_clinical_handoff
 
 logger = logging.getLogger(__name__)
 
-# A counselor whose last_ping is older than this threshold is treated as
-# unreachable even if their is_online flag is still True (handles ungraceful disconnects).
 _STALE_PING_SECONDS = 45
+_STALE_LOCK_MINUTES = 5
 
 
 # ── Tier helpers ─────────────────────────────────────────────────────────────
@@ -44,21 +52,24 @@ def _is_fresh(counselor_doc: dict) -> bool:
 
 
 def _is_available(counselor_doc: dict) -> bool:
-    """Returns True if the counselor is online, fresh, and below their session cap."""
+    """
+    Returns True only when ALL four gates pass:
+      1. is_online flag is True in DB
+      2. Heartbeat is fresh (last_ping within _STALE_PING_SECONDS)
+      3. Current sessions < max_concurrent_sessions
+      4. Counselor has an active WebSocket on this server process (Fix 12)
+    """
+    counselor_id = str(counselor_doc.get("_id", ""))
     return (
         counselor_doc.get("is_online", False)
         and _is_fresh(counselor_doc)
         and counselor_doc.get("current_active_sessions", 0)
         < counselor_doc.get("max_concurrent_sessions", 3)
+        and is_counselor_connected(counselor_id)
     )
 
 
 def _categories_match(current: str, previous: Optional[str]) -> bool:
-    """
-    Returns True when the current crisis category is compatible with the
-    counselor's established context for this user.
-    None previous means no prior context exists — treated as a match.
-    """
     if previous is None:
         return True
     return current == previous
@@ -66,9 +77,8 @@ def _categories_match(current: str, previous: Optional[str]) -> bool:
 
 async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optional[dict]:
     """
-    Pool fallback: returns the least-loaded online counselor that still has
-    capacity. Uses $expr so each counselor's own max_concurrent_sessions cap
-    is respected rather than a hardcoded global value.
+    Pool fallback: returns the least-loaded counselor that passes all availability
+    gates including an active WebSocket connection on this process.
     """
     db = get_database()
     if db is None:
@@ -86,9 +96,15 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
         except Exception:
             pass
 
-    cursor = db.admins.find(query).sort("current_active_sessions", 1).limit(1)
-    results = await cursor.to_list(length=1)
-    return results[0] if results else None
+    # Fetch a batch sorted by load; filter to those with active WebSockets
+    cursor = db.admins.find(query).sort("current_active_sessions", 1)
+    candidates = await cursor.to_list(length=20)
+
+    for candidate in candidates:
+        if is_counselor_connected(str(candidate["_id"])):
+            return candidate
+
+    return None
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -96,8 +112,7 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
 async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -> None:
     """
     Main routing orchestrator. Always called via asyncio.create_task() so it
-    never blocks the SSE stream. Implements the full 3-tier decision tree and
-    writes the final assignment back to the session document.
+    never blocks the SSE stream.
     """
     db = get_database()
     if db is None:
@@ -105,15 +120,28 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
         return
 
     crisis_category = consensus.get("category", "unknown")
-    # Optional hint from the timeout watchdog to skip a counselor that already failed.
     force_exclude_id: Optional[str] = consensus.get("_exclude_counselor_id")
 
     try:
-        # Atomic guard: claim the routing slot so concurrent SSE retries for the
-        # same session don't produce a double-assignment race.
+        # Fix 14: release stale __routing__ locks from past server crashes
+        # before acquiring the lock for this session.
+        stale_lock_cutoff = datetime.now(timezone.utc) - timedelta(minutes=_STALE_LOCK_MINUTES)
+        await db.sessions.update_many(
+            {
+                "assigned_counselor_id": "__routing__",
+                "routing_started_at": {"$lt": stale_lock_cutoff},
+            },
+            {"$set": {"assigned_counselor_id": None, "routing_started_at": None}},
+        )
+
+        # Fix 3: atomic lock writes routing_started_at so Fix 14 can calculate
+        # lock age after a crash and release it automatically.
         claim_result = await db.sessions.find_one_and_update(
             {"session_id": session_id, "assigned_counselor_id": None},
-            {"$set": {"assigned_counselor_id": "__routing__"}},
+            {"$set": {
+                "assigned_counselor_id": "__routing__",
+                "routing_started_at": datetime.now(timezone.utc),
+            }},
         )
         if claim_result is None:
             logger.info(f"[ROUTING] Session {session_id} already being routed — skipping duplicate task.")
@@ -131,13 +159,12 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
             logger.error(f"[ROUTING] User {user_id} not found — releasing routing lock.")
             await db.sessions.update_one(
                 {"session_id": session_id, "assigned_counselor_id": "__routing__"},
-                {"$set": {"assigned_counselor_id": None}},
+                {"$set": {"assigned_counselor_id": None, "routing_started_at": None}},
             )
             return
 
         preferred_id = user_doc.get("preferred_counselor_id")
 
-        # Skip sticky route if this counselor already failed this escalation
         if preferred_id and preferred_id == force_exclude_id:
             preferred_id = None
 
@@ -154,7 +181,6 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
         # ── Fallback: Pool Search ─────────────────────────────────────────────
         if assigned_counselor is None:
             logger.info(f"[ROUTING] Falling back to pool search for session {session_id}.")
-            # Exclude both the failed preferred counselor and any force-excluded counselor
             exclude_id = preferred_id or force_exclude_id
             assigned_counselor = await _find_available_counselor(exclude_id=exclude_id)
 
@@ -163,7 +189,7 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
             logger.warning(f"[ROUTING] No counselors available for session {session_id}. Serving hotline message.")
             await db.sessions.update_one(
                 {"session_id": session_id},
-                {"$set": {"assigned_counselor_id": None}},
+                {"$set": {"assigned_counselor_id": None, "routing_started_at": None}},
             )
             await db.messages.insert_one({
                 "session_id": session_id,
@@ -179,16 +205,19 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
 
         counselor_id_str = str(assigned_counselor["_id"])
 
-        # ── Persist assignment ────────────────────────────────────────────────
+        # ── Persist assignment — single atomic $set (Fix 8 enhancement) ──────
         await db.sessions.update_one(
             {"session_id": session_id},
             {"$set": {
                 "assigned_counselor_id": counselor_id_str,
                 "crisis_category": crisis_category,
+                "assigned_at": datetime.now(timezone.utc),
+                "assignment_complete": True,
+                "routing_started_at": None,
             }},
         )
 
-        # ── Generate handoff summary (background — counselor polls for it) ────
+        # ── Generate handoff summary in background ────────────────────────────
         asyncio.create_task(
             _run_summarization_and_save(user_id, session_id, crisis_category)
         )
@@ -214,11 +243,10 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
 
     except Exception:
         logger.exception(f"[ROUTING] Unhandled error routing session {session_id}")
-        # Release the routing lock so a manual retry is possible.
         try:
             await db.sessions.update_one(
                 {"session_id": session_id, "assigned_counselor_id": "__routing__"},
-                {"$set": {"assigned_counselor_id": None}},
+                {"$set": {"assigned_counselor_id": None, "routing_started_at": None}},
             )
         except Exception:
             pass
@@ -254,7 +282,7 @@ async def _notify_counselor(
     """
     Stub for counselor push notification.
     Replace with FCM, counselor dashboard WebSocket ping, or an internal
-    signal channel appropriate for your infrastructure.
+    signal channel for your infrastructure.
     """
     logger.info(
         f"[ROUTING] [NOTIFY] Counselor {counselor_id} paged for "

@@ -3,7 +3,7 @@ from typing import Optional
 from datetime import datetime
 
 
-# ── Assessment response ───────────────────────────────────────
+# ── Assessment response ───────────────────────────────────────────────────────
 
 class AssessmentResponse(BaseModel):
     status: str
@@ -13,7 +13,7 @@ class AssessmentResponse(BaseModel):
     user_id: str
 
 
-# ── Chat stream metadata ──────────────────────────────────────
+# ── Chat stream metadata ──────────────────────────────────────────────────────
 
 class EmotionData(BaseModel):
     dominant_emotion: str
@@ -25,7 +25,7 @@ class EmotionData(BaseModel):
     sadness_scores: list[float] = []
 
 
-# ── Chat history API ──────────────────────────────────────────
+# ── Chat history API ──────────────────────────────────────────────────────────
 
 class ChatMessageResponse(BaseModel):
     user_id: str
@@ -41,7 +41,7 @@ class ChatHistoryResponse(BaseModel):
     messages: list[ChatMessageResponse]
 
 
-# ── Session list API ──────────────────────────────────────────
+# ── Session list API ──────────────────────────────────────────────────────────
 
 class SessionResponse(BaseModel):
     session_id: str
@@ -59,14 +59,14 @@ class SessionListResponse(BaseModel):
     sessions: list[SessionResponse]
 
 
-# ── Human intervention API ────────────────────────────────────
+# ── Human intervention API ────────────────────────────────────────────────────
 
 class EscalatedSessionResponse(BaseModel):
     session_id: str
     user_id: str
     first_name: str = "Unknown"
     last_name: Optional[str] = None
-    is_active: bool = True          # ← was silently dropped before (Issue #3)
+    is_active: bool = True
     is_escalated: bool = True
     lethality_alert: bool = False
     escalated_at: Optional[datetime] = None
@@ -80,7 +80,7 @@ class EscalatedSessionListResponse(BaseModel):
     sessions: list[EscalatedSessionResponse]
 
 
-# ── Health / utility ──────────────────────────────────────────
+# ── Health / utility ──────────────────────────────────────────────────────────
 
 class TranscriptionResponse(BaseModel):
     text: str
@@ -88,7 +88,7 @@ class TranscriptionResponse(BaseModel):
     duration: Optional[float] = None
 
 
-# ── Token / Auth ──────────────────────────────────────────────
+# ── Token / Auth ──────────────────────────────────────────────────────────────
 
 class TokenData(BaseModel):
     user_id: str
@@ -96,23 +96,30 @@ class TokenData(BaseModel):
     role: Optional[str] = None
 
 
-# ── User Profile ──────────────────────────────────────────────
+# ── User Profile ──────────────────────────────────────────────────────────────
 
 class UserProfileData(BaseModel):
     user_id: str
-    full_name: str
+    # FC4: first_name + last_name are primary; full_name kept for backward compat
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    full_name: Optional[str] = None
     email: str
     phone_number: str
+    # FC3: is_admin derived at response-build time, not stored in DB
     is_user: bool = True
     is_admin: bool = False
-    professional_role: Optional[str] = "str"
-    license_number: Optional[str] = "str"
-    state_of_licensure: Optional[str] = "str"
-    npi_number: Optional[str] = "str"
-    practice_type: Optional[str] = "str"
-    city: Optional[str] = "str"
-    state: Optional[str] = "str"
-    consultation_mode: Optional[str] = "str"
+    # FC5: demographic fields
+    gender: Optional[str] = None
+    age: Optional[int] = None
+    professional_role: Optional[str] = None
+    license_number: Optional[str] = None
+    state_of_licensure: Optional[str] = None
+    npi_number: Optional[str] = None
+    practice_type: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    consultation_mode: Optional[str] = None
     created_at: Optional[datetime] = None
     last_login: Optional[datetime] = None
 
@@ -120,30 +127,30 @@ class UserProfileData(BaseModel):
         "json_schema_extra": {
             "example": {
                 "user_id": "12345",
-                "full_name": "John Doe",
-                "email": "john@example.com",
+                "first_name": "Jane",
+                "last_name": "Doe",
+                "full_name": "Jane Doe",
+                "email": "jane@example.com",
                 "phone_number": "+911234567890",
                 "is_user": True,
                 "is_admin": False,
-                "professional_role": "Licensed Psychologist (PhD / PsyD)",
-                "license_number": "LIC12345",
-                "state_of_licensure": "California",
-                "npi_number": "1234567890",
-                "practice_type": "Private",
-                "city": "Los Angeles",
-                "state": "CA",
-                "consultation_mode": "In-person"
+                "gender": "female",
+                "age": 28,
             }
         }
     }
 
 
-# ── Auth Responses ────────────────────────────────────────────
+# ── Auth Responses ────────────────────────────────────────────────────────────
 
 class UserSignupResponse(BaseModel):
+    """FC1: registration returns tokens so the client is immediately authenticated."""
     status: str
     message: str
-    user_id: str
+    user: UserProfileData
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
 
 
 class UserLoginResponse(BaseModel):

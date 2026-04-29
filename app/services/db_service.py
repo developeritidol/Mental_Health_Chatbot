@@ -158,9 +158,18 @@ async def get_user_profile(user_id: str) -> Optional[dict]:
 
         doc = await db.users.find_one({"$or": query})
 
+        # FC4: prefer first_name, fall back to full_name (legacy docs), then "Friend"
+        name = "Friend"
+        if doc:
+            name = (
+                doc.get("first_name")
+                or doc.get("full_name")
+                or doc.get("name")
+                or "Friend"
+            )
         return {
             "user_id": user_id,
-            "name": doc.get("full_name", "Friend") if doc else "Friend",
+            "name": name,
             "personality_summary": doc.get("personality_summary", "Not provided") if doc else "Not provided",
             "country": "IN"
         }

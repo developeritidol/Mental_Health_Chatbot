@@ -204,16 +204,30 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
                 {"session_id": session_id},
                 {"$set": {"assigned_counselor_id": None, "routing_started_at": None}},
             )
+            hotline_text = (
+                "We're sorry, no counselors are available right now. "
+                "If you are in immediate danger, please call the National Crisis Helpline: 988."
+            )
             await db.messages.insert_one({
                 "session_id": session_id,
                 "role": "system",
                 "sender_type": "system",
-                "content": (
-                    "We're sorry, no counselors are available right now. "
-                    "If you are in immediate danger, please call the National Crisis Helpline: 988."
-                ),
+                "content": hotline_text,
                 "timestamp": datetime.now(timezone.utc),
             })
+            # Push immediately to the user's open WebSocket room so they don't wait 20 minutes
+            try:
+                from app.api.routes.human import manager as ws_manager
+                await ws_manager.send_to_all(user_id, {
+                    "role": "system",
+                    "text": hotline_text,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "is_human": False,
+                    "is_system": True,
+                    "type": "counselor_unavailable",
+                })
+            except Exception:
+                pass
             return
 
         counselor_id_str = str(assigned_counselor["_id"])

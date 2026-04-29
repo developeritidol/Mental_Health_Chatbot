@@ -106,7 +106,7 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
         )
     if current_session and current_session.get("is_escalated"):
         _settings = get_settings()
-        ws_url = f"ws://{_settings.SERVER_HOST}:{_settings.SERVER_PORT}/api/human/chat/{user_id}"
+        ws_url = f"ws://{_settings.SERVER_PUBLIC_HOST}:{_settings.SERVER_PORT}/api/human/chat/{user_id}"
 
         logger.info(f"[GUARD] Session {actual_session_id} for user {user_id} is escalated. Redirecting.")
 
@@ -211,11 +211,14 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
         }))
 
         # Return a single done-event — no AI chunks, no dual response
+        _settings = get_settings()
+        _ws_url = f"ws://{_settings.SERVER_PUBLIC_HOST}:{_settings.SERVER_PORT}/api/human/chat/{user_id}"
         crisis_payload = {
             "done": True,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": "crisis_escalation",
             "handoff_message": "A counselor is joining shortly... you're not alone.",
+            "websocket_url": _ws_url,
             "emotion": {
                 "dominant_emotion": emotion_result.dominant if emotion_result else "neutral",
                 "response_mode": consensus.get("category", "general"),

@@ -138,10 +138,11 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
             {"$set": {"assigned_counselor_id": None, "routing_started_at": None}},
         )
 
-        # Fix 3: atomic lock writes routing_started_at so Fix 14 can calculate
-        # lock age after a crash and release it automatically.
+        # Acquire routing lock. Query excludes "__routing__" to prevent duplicate
+        # concurrent routing tasks, but allows any other value (null or a stale
+        # counselor ID from a prior closed session) so re-escalations are not blocked.
         claim_result = await db.sessions.find_one_and_update(
-            {"session_id": session_id, "assigned_counselor_id": None},
+            {"session_id": session_id, "assigned_counselor_id": {"$ne": "__routing__"}},
             {"$set": {
                 "assigned_counselor_id": "__routing__",
                 "routing_started_at": datetime.now(timezone.utc),
@@ -283,7 +284,7 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
             f"(category: {crisis_category})."
         )
 
-        await _notify_counselor(counselor_id_str, session_id, crisis_category)
+        await _notify_counselor(counselor_id_str, session_id, crisis_category, user_id)
 
     except Exception:
         logger.exception(f"[ROUTING] Unhandled error routing session {session_id}")
@@ -383,13 +384,60 @@ async def _notify_counselor(
     counselor_id: str,
     session_id: str,
     crisis_category: str,
+    user_id: str,
 ) -> None:
     """
-    Stub for counselor push notification.
-    Replace with FCM, counselor dashboard WebSocket ping, or an internal
-    signal channel for your infrastructure.
+    Sends two notifications:
+    1. Targeted push to the assigned counselor's dashboard WebSocket via notify_counselor().
+       Falls back to broadcast_to_dashboard() if the counselor's socket isn't tracked yet.
+    2. A broadcast to ALL dashboards with type="new_escalation" so other counselors
+       and admins can see live queue activity.
     """
     logger.info(
         f"[ROUTING] [NOTIFY] Counselor {counselor_id} paged for "
         f"session {session_id} (category: {crisis_category})."
     )
+    try:
+        from app.core.config import get_settings
+        from app.api.routes.human import manager as ws_manager
+        _settings = get_settings()
+        ws_url = (
+            f"ws://{_settings.SERVER_PUBLIC_HOST}:{_settings.SERVER_PORT}"
+            f"/api/human/chat/{user_id}"
+        )
+
+        # 1 — Targeted: only the assigned counselor
+        assigned_payload = {
+            "type": "counselor_assigned",
+            "counselor_id": counselor_id,
+            "session_id": session_id,
+            "user_id": user_id,
+            "crisis_category": crisis_category,
+            "websocket_url": ws_url,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        delivered = await ws_manager.notify_counselor(counselor_id, assigned_payload)
+        if delivered:
+            logger.info(
+                f"[ROUTING] [NOTIFY] ✓ Targeted assignment push delivered to counselor {counselor_id}."
+            )
+        else:
+            # Dashboard WS not in per-counselor registry — fall back so assignment isn't lost
+            await ws_manager.broadcast_to_dashboard(assigned_payload)
+            logger.warning(
+                f"[ROUTING] [NOTIFY] ⚠  Counselor {counselor_id} not in counselor_ws — "
+                f"used broadcast_to_dashboard fallback."
+            )
+
+        # 2 — Broadcast: queue activity visible to all admins/counselors
+        await ws_manager.broadcast_to_dashboard({
+            "type": "new_escalation",
+            "assigned_counselor_id": counselor_id,
+            "session_id": session_id,
+            "user_id": user_id,
+            "crisis_category": crisis_category,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    except Exception as e:
+        logger.warning(f"[ROUTING] Dashboard notification failed for counselor {counselor_id}: {e}")

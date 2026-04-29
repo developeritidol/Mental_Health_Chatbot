@@ -334,6 +334,7 @@ async def close_escalation(session_id: str) -> bool:
             {"session_id": session_id},
             {"$set": {
                 "is_escalated": False,
+                "assigned_counselor_id": None,
                 "escalation_closed_at": datetime.now(timezone.utc),
                 "updated_at": datetime.now(timezone.utc),
             }},
@@ -357,6 +358,7 @@ async def close_escalation_by_user(user_id: str) -> bool:
             {"user_id": user_id, "is_escalated": True},
             {"$set": {
                 "is_escalated": False,
+                "assigned_counselor_id": None,
                 "escalation_closed_at": datetime.now(timezone.utc),
                 "updated_at": datetime.now(timezone.utc),
             }},

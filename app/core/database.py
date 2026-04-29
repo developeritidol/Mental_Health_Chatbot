@@ -43,6 +43,17 @@ async def connect_to_mongo():
         # Smart Routing: counselor availability queries filter on is_online + last_ping
         await db_manager.db.admins.create_index([("is_online", 1), ("last_ping", -1)])
         await db_manager.db.admins.create_index("current_active_sessions")
+        # Doctor-User Assignment System: fast lookup for the active assignment
+        await db_manager.db.doctor_user_assignments.create_index(
+            [("user_id", 1), ("status", 1)]
+        )
+        # Unique partial index: only ONE active assignment per user at any time.
+        # This prevents duplicate crisis assignments at the database level.
+        await db_manager.db.doctor_user_assignments.create_index(
+            "user_id",
+            unique=True,
+            partialFilterExpression={"status": "active"},
+        )
         logger.info("MongoDB connected and indexes verified.")
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {e}")

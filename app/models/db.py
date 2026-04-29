@@ -97,6 +97,24 @@ class SessionModelDB(BaseModel):
     assignment_complete: bool = False
 
 
+class DoctorUserAssignmentDB(BaseModel):
+    """
+    Doctor-User Assignment System
+    ──────────────────────────────
+    Bridge table between the users and admins (doctors/counselors) collections.
+    Maintains a complete history of all crisis assignments.
+
+    Rules:
+      - One user can have MULTIPLE records but only ONE active record at any time.
+      - Old records are never deleted, only marked inactive (preserved as history).
+      - A unique partial index on (user_id + status="active") prevents duplicates.
+    """
+    user_id: str
+    doctor_id: str
+    assigned_at: datetime = Field(default_factory=datetime.utcnow)
+    status: str = Field(default="active", description="'active' or 'inactive'")
+
+
 class RobertaAnalysis(BaseModel):
     dominant_emotion: str
     scores: Dict[str, float] = Field(default_factory=dict)

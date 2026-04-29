@@ -340,7 +340,7 @@ async def forgot_password(payload: ForgotPasswordRequest):
         user_doc = await find_user_by_identifier(db, payload.email)
         if not user_doc:
             return ForgotPasswordResponse(
-                status="failed",
+                status="failure",
                 message="If your email is registered, you will receive an OTP shortly.",
             )
 

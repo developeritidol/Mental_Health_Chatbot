@@ -65,11 +65,33 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
     cursor = db.sessions.find(query).sort("escalated_at", -1)
     docs = await cursor.to_list(length=None)
 
+    # Collect unique user IDs and batch-fetch their names
+    user_ids = list({doc.get("user_id") for doc in docs if doc.get("user_id")})
+    user_names: dict[str, tuple[str, Optional[str]]] = {}
+    if user_ids:
+        try:
+            user_cursor = db.users.find(
+                {"_id": {"$in": [ObjectId(uid) for uid in user_ids]}},
+                {"_id": 1, "first_name": 1, "last_name": 1, "full_name": 1},
+            )
+            user_docs = await user_cursor.to_list(length=None)
+            for u in user_docs:
+                uid_str = str(u["_id"])
+                fn = u.get("first_name") or (u.get("full_name") or "Unknown").split()[0]
+                ln = u.get("last_name")
+                user_names[uid_str] = (fn, ln)
+        except Exception:
+            pass
+
     sessions = []
     for doc in docs:
+        uid = doc.get("user_id", "")
+        fn, ln = user_names.get(uid, ("Unknown", None))
         sessions.append({
             "session_id": doc.get("session_id"),
-            "user_id": doc.get("user_id"),
+            "user_id": uid,
+            "first_name": fn,
+            "last_name": ln,
             "is_active": doc.get("is_active", True),
             "is_escalated": doc.get("is_escalated", True),
             "lethality_alert": doc.get("lethality_alert", False),
@@ -126,6 +148,7 @@ async def close_escalated_session(user_id: str, current_provider = Depends(get_c
             {"user_id": user_id, "is_escalated": True},
             {"$set": {
                 "is_escalated": False,
+                "assigned_counselor_id": None,
                 "escalation_closed_at": datetime.now(timezone.utc),
                 "updated_at": datetime.now(timezone.utc),
             }}
@@ -140,11 +163,6 @@ async def close_escalated_session(user_id: str, current_provider = Depends(get_c
 
     manager.cancel_timeout_task(user_id)
 
-    if user_id in manager.rooms:
-        del manager.rooms[user_id]
-    if user_id in manager.has_human:
-        del manager.has_human[user_id]
-
     close_notice = {
         "role": "system",
         "text": "The counselor has ended this session. You will be connected back to AI support.",
@@ -153,11 +171,17 @@ async def close_escalated_session(user_id: str, current_provider = Depends(get_c
         "is_system": True,
         "type": "session_closed",
     }
-    for ws in manager.rooms.get(user_id, []):
+    # Send before removing the room so active WebSocket connections receive the notice
+    for ws in list(manager.rooms.get(user_id, [])):
         try:
             await ws.send_text(json.dumps(close_notice))
         except Exception:
             pass
+
+    if user_id in manager.rooms:
+        del manager.rooms[user_id]
+    if user_id in manager.has_human:
+        del manager.has_human[user_id]
 
     return {
         "status": "success",
@@ -173,6 +197,9 @@ class ConnectionManager:
         self.rooms: dict[str, list[WebSocket]] = {}
         self.has_human: dict[str, bool] = {}
         self.dashboard_clients: set[WebSocket] = set()
+        # counselor_id → list of their active dashboard WebSocket(s)
+        # Allows targeted push to a specific counselor without broadcasting to everyone
+        self.counselor_ws: dict[str, list[WebSocket]] = {}
         self.timeout_tasks: dict[str, asyncio.Task] = {}
 
     def start_timeout_task(self, user_id: str, task: asyncio.Task):
@@ -233,16 +260,25 @@ class ConnectionManager:
                 pass
             self.disconnect(user_id, ws)
 
-    async def connect_dashboard(self, ws: WebSocket):
+    async def connect_dashboard(self, ws: WebSocket, counselor_id: Optional[str] = None):
         await ws.accept()
         self.dashboard_clients.add(ws)
+        if counselor_id:
+            self.counselor_ws.setdefault(counselor_id, []).append(ws)
         logger.info(f"[WS] Admin dashboard connected. Total: {len(self.dashboard_clients)}")
 
-    def disconnect_dashboard(self, ws: WebSocket):
+    def disconnect_dashboard(self, ws: WebSocket, counselor_id: Optional[str] = None):
         self.dashboard_clients.discard(ws)
+        if counselor_id and counselor_id in self.counselor_ws:
+            self.counselor_ws[counselor_id] = [
+                c for c in self.counselor_ws[counselor_id] if c is not ws
+            ]
+            if not self.counselor_ws[counselor_id]:
+                del self.counselor_ws[counselor_id]
         logger.info(f"[WS] Admin dashboard disconnected. Total: {len(self.dashboard_clients)}")
 
     async def broadcast_to_dashboard(self, payload: dict):
+        """Send to ALL connected dashboard clients (e.g. new escalation alert)."""
         if not self.dashboard_clients:
             return
         message = json.dumps(payload)
@@ -254,6 +290,28 @@ class ConnectionManager:
                 dead.add(ws)
         for ws in dead:
             self.disconnect_dashboard(ws)
+
+    async def notify_counselor(self, counselor_id: str, payload: dict) -> bool:
+        """
+        Send a targeted push to a specific counselor's dashboard WebSocket(s).
+        Returns True if at least one message was delivered, False if the counselor
+        has no active dashboard connection.
+        """
+        targets = self.counselor_ws.get(counselor_id, []).copy()
+        if not targets:
+            return False
+        message = json.dumps(payload)
+        delivered = False
+        dead = []
+        for ws in targets:
+            try:
+                await ws.send_text(message)
+                delivered = True
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect_dashboard(ws, counselor_id)
+        return delivered
 
 
 manager = ConnectionManager()
@@ -348,22 +406,20 @@ async def inactivity_watchdog():
 
                     await db.sessions.update_one(
                         {"session_id": session_id},
-                        {"$set": {"is_escalated": False, "escalation_closed_at": datetime.now(timezone.utc)}}
+                        {"$set": {
+                            "is_escalated": False,
+                            "assigned_counselor_id": None,
+                            "escalation_closed_at": datetime.now(timezone.utc),
+                        }}
                     )
 
-                    # Free the counselor's capacity slot so they can accept new patients
+                    # Free the counselor's capacity slot — is_online is owned by dashboard WebSocket
                     if counselor_id and counselor_id != "__routing__":
                         try:
                             await db.admins.update_one(
                                 {"_id": ObjectId(counselor_id), "current_active_sessions": {"$gt": 0}},
                                 {"$inc": {"current_active_sessions": -1}},
                             )
-                            updated_admin = await db.admins.find_one({"_id": ObjectId(counselor_id)})
-                            if updated_admin and updated_admin.get("current_active_sessions", 0) <= 0:
-                                await db.admins.update_one(
-                                    {"_id": ObjectId(counselor_id)},
-                                    {"$set": {"is_online": False, "current_active_sessions": 0}},
-                                )
                             logger.info(f"[WATCHDOG] Freed capacity slot for counselor {counselor_id}.")
                         except Exception as e:
                             logger.error(f"[WATCHDOG] Failed to free capacity for counselor {counselor_id}: {e}")
@@ -381,6 +437,73 @@ async def inactivity_watchdog():
 
         except Exception as e:
             logger.error(f"[WATCHDOG] Error in loop: {e}")
+
+
+# ── User-waiting notification ─────────────────────────────────────────────────
+
+async def _notify_assigned_counselor_user_waiting(
+    user_id: str, session_doc: Optional[dict]
+) -> None:
+    """
+    When a user connects to the chat room, push a targeted real-time notification
+    to the assigned counselor's dashboard WebSocket so they know the patient is
+    waiting. Falls back to a broadcast if the counselor is not in counselor_ws
+    (e.g. they connected before the counselor_ws dict was populated).
+    """
+    from app.core.config import get_settings
+    _settings = get_settings()
+
+    assigned_counselor_id: Optional[str] = None
+    session_id: str = user_id
+
+    if session_doc:
+        assigned_counselor_id = session_doc.get("assigned_counselor_id")
+        session_id = session_doc.get("session_id", user_id)
+        # Routing may still be in progress — wait briefly and re-query
+        if assigned_counselor_id in (None, "__routing__"):
+            db = get_database()
+            if db is not None:
+                for _ in range(6):  # up to 12 seconds
+                    await asyncio.sleep(2)
+                    fresh = await db.sessions.find_one({"session_id": session_id})
+                    cid = (fresh or {}).get("assigned_counselor_id")
+                    if cid and cid != "__routing__":
+                        assigned_counselor_id = cid
+                        break
+
+    ws_url = (
+        f"ws://{_settings.SERVER_PUBLIC_HOST}:{_settings.SERVER_PORT}"
+        f"/api/human/chat/{user_id}"
+    )
+    payload = {
+        "type": "user_waiting_in_room",
+        "user_id": user_id,
+        "session_id": session_id,
+        "websocket_url": ws_url,
+        "message": "Your patient has connected and is waiting in the chat room.",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if assigned_counselor_id and assigned_counselor_id != "__routing__":
+        payload["counselor_id"] = assigned_counselor_id
+        delivered = await manager.notify_counselor(assigned_counselor_id, payload)
+        if delivered:
+            logger.info(
+                f"[NOTIFY] ✓ Targeted push sent | counselor={assigned_counselor_id}"
+                f" | type=user_waiting_in_room | room={user_id}"
+            )
+        else:
+            # Counselor's dashboard WS not in targeted registry — fall back to broadcast
+            await manager.broadcast_to_dashboard(payload)
+            logger.warning(
+                f"[NOTIFY] ⚠  Counselor {assigned_counselor_id} not in counselor_ws — broadcast fallback used"
+            )
+    else:
+        # No assignment yet (race condition) — broadcast so no counselor misses it
+        await manager.broadcast_to_dashboard(payload)
+        logger.warning(
+            f"[NOTIFY] ⚠  No assigned counselor found for room={user_id} — broadcast fallback used"
+        )
 
 
 # ── Handoff Summary Background Delivery (Fix 11) ─────────────────────────────
@@ -413,17 +536,109 @@ async def _deliver_handoff_when_ready(ws: WebSocket, session_id: str, db) -> Non
 
 @router.websocket("/escalated/ws")
 async def dashboard_notifications_ws(websocket: WebSocket):
-    await manager.connect_dashboard(websocket)
+    """
+    Counselor dashboard connection.
+    Authenticates the counselor via ?token=<jwt>, marks them as available in
+    the connection_registry and sets is_online=True in DB so the routing engine
+    can find and assign them. Heartbeat keeps last_ping fresh.
+
+    Unauthenticated connections (e.g. admin monitors) are accepted but do not
+    affect counselor availability.
+    """
+    # 1. Extract and verify JWT — optional, dashboard degrades gracefully without it
+    token = websocket.query_params.get("token", "").strip()
+    counselor_id: Optional[str] = None
+
+    dashboard_ip = websocket.client.host if websocket.client else "unknown"
+
+    if token:
+        try:
+            credentials_exc = HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Could not validate credentials",
+            )
+            token_data = await verify_token(token, credentials_exc)
+            counselor_id = token_data.user_id
+        except Exception:
+            logger.warning(
+                f"[WS DASHBOARD] ✗ REJECTED | ip={dashboard_ip} | reason=invalid token"
+            )
+            pass  # unrecognised token — treat as unauthenticated monitor
+
+    await manager.connect_dashboard(websocket, counselor_id=counselor_id)
+
+    # 2. Authenticated counselor: mark available for routing
+    db = get_database()
+    heartbeat_task: Optional[asyncio.Task] = None
+
+    if counselor_id and db is not None:
+        mark_counselor_connected(counselor_id)
+        counselor_display = counselor_id  # fallback; overwrite if DB lookup succeeds
+        try:
+            await db.admins.update_one(
+                {"_id": ObjectId(counselor_id)},
+                {"$set": {"is_online": True, "last_ping": datetime.now(timezone.utc)}},
+            )
+            # Fetch name for log readability
+            admin_doc = await db.admins.find_one(
+                {"_id": ObjectId(counselor_id)}, {"first_name": 1, "last_name": 1}
+            )
+            if admin_doc:
+                fn = admin_doc.get("first_name", "")
+                ln = admin_doc.get("last_name", "")
+                counselor_display = f"{fn} {ln}".strip() or counselor_id
+            logger.info(
+                f"[WS DASHBOARD] ✓ CONNECTED | counselor_id={counselor_id}"
+                f" | name={counselor_display} | ip={dashboard_ip} | status=online (available for routing)"
+            )
+        except Exception as e:
+            logger.warning(f"[WS DASHBOARD] Could not set online status for {counselor_id}: {e}")
+        heartbeat_task = asyncio.create_task(_counselor_heartbeat(counselor_id))
+    else:
+        logger.info(f"[WS DASHBOARD] ✓ CONNECTED | role=anonymous monitor | ip={dashboard_ip}")
+
     try:
         while True:
             data = await websocket.receive_text()
             if data == "ping":
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
-        manager.disconnect_dashboard(websocket)
+        logger.info(f"[WS DASHBOARD] ✗ DISCONNECTED | counselor_id={counselor_id or 'anonymous'}")
+        manager.disconnect_dashboard(websocket, counselor_id=counselor_id)
     except Exception as e:
-        logger.error(f"[WS DASHBOARD] Error: {e}")
-        manager.disconnect_dashboard(websocket)
+        logger.error(
+            f"[WS DASHBOARD] ✗ UNHANDLED ERROR | counselor_id={counselor_id or 'anonymous'} | error={e}",
+            exc_info=True,
+        )
+        manager.disconnect_dashboard(websocket, counselor_id=counselor_id)
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+    finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+        if counselor_id and db is not None:
+            mark_counselor_disconnected(counselor_id)
+            try:
+                # Only go offline if not currently in an active patient session
+                updated = await db.admins.find_one({"_id": ObjectId(counselor_id)})
+                if updated and updated.get("current_active_sessions", 0) <= 0:
+                    await db.admins.update_one(
+                        {"_id": ObjectId(counselor_id)},
+                        {"$set": {"is_online": False}},
+                    )
+                    logger.info(
+                        f"[WS DASHBOARD] Counselor {counselor_id} is now OFFLINE | status=unavailable for routing"
+                    )
+                else:
+                    active = (updated or {}).get("current_active_sessions", 0)
+                    logger.info(
+                        f"[WS DASHBOARD] Counselor {counselor_id} dashboard closed but stays ONLINE"
+                        f" | active_sessions={active}"
+                    )
+            except Exception as e:
+                logger.warning(f"[WS DASHBOARD] Could not clear online status for {counselor_id}: {e}")
 
 
 # ── Human Chat WebSocket ──────────────────────────────────────────────────────
@@ -445,7 +660,14 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
     else:
         token = websocket.query_params.get("token", "").strip()
 
+    role = websocket.query_params.get("role", "user")
+    counselor_name = websocket.query_params.get("counselor_name", "Crisis Support Team")
+    client_ip = websocket.client.host if websocket.client else "unknown"
+
     if not token:
+        logger.warning(
+            f"[WS CHAT] ✗ REJECTED | room={user_id} | role={role} | ip={client_ip} | reason=no token"
+        )
         # Fix 15: close at handshake layer — no accept()
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
@@ -460,16 +682,19 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
     try:
         token_data = await verify_token(token, credentials_exception)
     except HTTPException:
+        logger.warning(
+            f"[WS CHAT] ✗ REJECTED | room={user_id} | role={role} | ip={client_ip} | reason=invalid token"
+        )
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
     authenticated_user_id = token_data.user_id
-    role = websocket.query_params.get("role", "user")
-    counselor_name = websocket.query_params.get("counselor_name", "Crisis Support Team")
 
     # 3. Identity check: user URL must match JWT
     if role == "user" and authenticated_user_id != user_id:
-        logger.warning(f"[WS SECURITY] User {authenticated_user_id} attempted room for user {user_id}")
+        logger.warning(
+            f"[WS CHAT] ✗ REJECTED | room={user_id} | role=user | auth_id={authenticated_user_id} | reason=identity mismatch"
+        )
         # Fix 15: close before accept
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
@@ -493,11 +718,11 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
     #             await websocket.close(code=1011, reason="Internal server error")
     #             return
 
-    #     if not is_escalated:
-    #         logger.warning(f"[WS REJECT] Non-escalated user {user_id} attempted handoff connection.")
-    #         # Fix 15: reject at handshake layer
-    #         await websocket.close(code=4003)
-    #         return
+        if not is_escalated:
+            logger.warning(f"[WS REJECT] Non-escalated user {user_id} attempted handoff connection.")
+            # Fix 15: reject at handshake layer
+            await websocket.close(code=4003)
+            return
 
     # # 5. Counselor path: validate session assignment
     # if role == "human_counselor":
@@ -512,29 +737,44 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
     #             await websocket.close(code=1011, reason="Internal server error")
     #             return
 
-    #     if session_doc:
-    #         actual_session_id = session_doc.get("session_id", user_id)
-    #         assigned = session_doc.get("assigned_counselor_id")
-    #         # Reject if routed to a different counselor
-    #         if assigned and assigned not in (None, "__routing__") and assigned != authenticated_user_id:
-    #             logger.warning(
-    #                 f"[WS SECURITY] Counselor {authenticated_user_id} unauthorised for session "
-    #                 f"{actual_session_id} (assigned: {assigned})."
-    #             )
-    #             # Fix 15: reject at handshake layer
-    #             await websocket.close(code=4003)
-    #             return
+        if session_doc:
+            actual_session_id = session_doc.get("session_id", user_id)
+            assigned = session_doc.get("assigned_counselor_id")
+            # Reject if routed to a different counselor
+            if assigned and assigned not in (None, "__routing__") and assigned != authenticated_user_id:
+                logger.warning(
+                    f"[WS SECURITY] Counselor {authenticated_user_id} unauthorised for session "
+                    f"{actual_session_id} (assigned: {assigned})."
+                )
+                # Fix 15: reject at handshake layer
+                await websocket.close(code=4003)
+                return
 
     # 6. Accept WebSocket and register
     await manager.connect(user_id, websocket)
-    logger.info(f"[WS] Role '{role}' joined room '{user_id}'")
+    if role == "human_counselor":
+        logger.info(
+            f"[WS CHAT] ✓ CONNECTED | role=counselor | room={user_id}"
+            f" | counselor_id={authenticated_user_id} | name={counselor_name}"
+        )
+    else:
+        logger.info(
+            f"[WS CHAT] ✓ CONNECTED | role=user | room={user_id} | user_id={authenticated_user_id}"
+        )
 
-    # 7. User: start fallback timeout watchdog
+    # 7. User: start fallback timeout watchdog + notify assigned counselor
     if role == "user":
         if user_id not in manager.timeout_tasks:
             task = asyncio.create_task(_counselor_timeout_watchdog(user_id))
             manager.start_timeout_task(user_id, task)
-            logger.info(f"[WS] Started {COUNSELOR_TIMEOUT_SECONDS}s counselor timeout for room '{user_id}'")
+            logger.info(
+                f"[WS CHAT] ⏱  Counselor timeout watchdog started | room={user_id} | timeout={COUNSELOR_TIMEOUT_SECONDS}s"
+            )
+
+        # Push "user is now waiting" to the assigned counselor's dashboard
+        asyncio.create_task(
+            _notify_assigned_counselor_user_waiting(user_id, session_doc)
+        )
 
     heartbeat_task: Optional[asyncio.Task] = None
 
@@ -622,6 +862,11 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
                 continue
 
             is_human = (role == "human_counselor")
+            preview = text[:80] + ("..." if len(text) > 80 else "")
+            logger.info(
+                f"[WS CHAT] 💬 MESSAGE | room={user_id} | from={'counselor' if is_human else 'user'}"
+                f" | len={len(text)} | text=\"{preview}\""
+            )
 
             payload = {
                 "type": "message",
@@ -634,7 +879,7 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
             }
 
             msg_session_id = actual_session_id
-            if db and msg_session_id == user_id:
+            if db is not None and msg_session_id == user_id:
                 session_info = await db.sessions.find_one(
                     {"user_id": user_id}, sort=[("created_at", -1)]
                 )
@@ -655,6 +900,15 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
 
     except WebSocketDisconnect:
         manager.disconnect(user_id, websocket)
+        if role == "human_counselor":
+            logger.info(
+                f"[WS CHAT] ✗ DISCONNECTED | role=counselor | room={user_id}"
+                f" | counselor_id={authenticated_user_id} | name={counselor_name}"
+            )
+        else:
+            logger.info(
+                f"[WS CHAT] ✗ DISCONNECTED | role=user | room={user_id} | user_id={authenticated_user_id}"
+            )
         leave_notice = {
             "role": "system",
             "text": f"{'Counselor' if role == 'human_counselor' else 'User'} has disconnected.",
@@ -664,26 +918,33 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
         }
         await manager.broadcast(user_id, leave_notice, websocket)
 
+    except Exception as e:
+        logger.error(
+            f"[WS CHAT] ✗ UNHANDLED ERROR | room={user_id} | role={role}"
+            f" | user_id={authenticated_user_id} | error={e}",
+            exc_info=True,
+        )
+        manager.disconnect(user_id, websocket)
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+
     finally:
         if heartbeat_task is not None:
             heartbeat_task.cancel()
 
         if role == "human_counselor":
-            # Fix 12: remove from connection registry on disconnect
+            # Decrement ref-count in registry; counselor stays connected if dashboard is still open
             mark_counselor_disconnected(authenticated_user_id)
 
             if db is not None:
                 try:
+                    # Only decrement the session counter — is_online is owned by the dashboard WebSocket
                     await db.admins.update_one(
                         {"_id": ObjectId(authenticated_user_id), "current_active_sessions": {"$gt": 0}},
                         {"$inc": {"current_active_sessions": -1}},
                     )
-                    updated_admin = await db.admins.find_one({"_id": ObjectId(authenticated_user_id)})
-                    if updated_admin and updated_admin.get("current_active_sessions", 0) <= 0:
-                        await db.admins.update_one(
-                            {"_id": ObjectId(authenticated_user_id)},
-                            {"$set": {"is_online": False, "current_active_sessions": 0}},
-                        )
                 except Exception as e:
                     logger.error(f"[WS] Failed to clean up presence for counselor {authenticated_user_id}: {e}")
 
@@ -693,6 +954,7 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
                             {"session_id": actual_session_id},
                             {"$set": {
                                 "is_escalated": False,
+                                "assigned_counselor_id": None,
                                 "escalation_closed_at": datetime.now(timezone.utc),
                                 "updated_at": datetime.now(timezone.utc),
                             }},
@@ -709,10 +971,16 @@ async def _counselor_heartbeat(counselor_id: str) -> None:
     try:
         while True:
             await asyncio.sleep(20)
-            await db.admins.update_one(
-                {"_id": ObjectId(counselor_id)},
-                {"$set": {"last_ping": datetime.now(timezone.utc)}},
-            )
+            try:
+                await db.admins.update_one(
+                    {"_id": ObjectId(counselor_id)},
+                    {"$set": {"last_ping": datetime.now(timezone.utc)}},
+                )
+            except Exception as e:
+                # A single DB failure must not kill the heartbeat loop — log and continue
+                logger.warning(
+                    f"[HEARTBEAT] DB write failed for counselor {counselor_id}: {e} — retrying next tick"
+                )
     except asyncio.CancelledError:
         pass
     except Exception as e:

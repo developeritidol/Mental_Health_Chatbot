@@ -62,11 +62,17 @@ async def synthesize_consensus(text: str, roberta_emotion: str, roberta_score: f
         if result.get("is_crisis"):
             logger.warning(f"[SAFETY] Consensus Synthesizer identified active crisis! Reasoning: {result.get('reasoning')}")
         
+        is_crisis = result.get("is_crisis", False)
         return {
-            "llm_sentiment": result.get("llm_sentiment", "unknown"),
-            "category": result.get("category", "general"),
-            "is_crisis": result.get("is_crisis", False),
-            "reasoning": result.get("reasoning", "")
+            "llm_sentiment":    result.get("llm_sentiment", "unknown"),
+            "category":         result.get("category", "general"),
+            "is_crisis":        is_crisis,
+            "reasoning":        result.get("reasoning", ""),
+            "intensity":        "high" if is_crisis else "moderate",
+            "message_class":    "crisis" if is_crisis else "emotional_ongoing",
+            "recommended_tone": "validating",
+            "token_budget":     200 if is_crisis else 320,
+            "crisis_type":      result.get("category") if is_crisis else None,
         }
             
     except Exception as e:

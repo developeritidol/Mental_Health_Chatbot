@@ -207,6 +207,7 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
             "type": "new_escalation",
             "session_id": actual_session_id,
             "user_id": user_id,
+            "crisis_category": consensus.get("category", "unknown"),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }))
 

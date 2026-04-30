@@ -56,6 +56,46 @@ class PersonalityAnswers(BaseModel):
     trusts_instincts: str = "Sometimes"
 
 
+# ── Nested Registration (Mobile Compat) ───────────────────────────────────────
+
+class RoleDefinition(BaseModel):
+    is_user: bool
+
+class RoleSection(BaseModel):
+    definition: RoleDefinition
+
+class CommonFields(BaseModel):
+    first_name: str
+    last_name: str
+    email: str
+    password: str
+    gender: Optional[str] = None
+    age: Optional[int] = None
+    phone_number: str
+
+class EmergencyContacts(BaseModel):
+    emergency_contact_name: Optional[str] = None
+    # Note: Issues Report used "emergency_contact_number" instead of "emergency_contact_phone"
+    emergency_contact_number: Optional[str] = None
+    emergency_contact_relation: Optional[str] = None
+
+class AdminRegistration(BaseModel):
+    city: Optional[str] = None
+    state: Optional[str] = None
+    npi_number: Optional[str] = None
+    professional_role: Optional[str] = None
+    license_number: Optional[str] = None
+    state_of_licensure: Optional[str] = None
+    practice_type: Optional[str] = None
+    consultation_mode: Optional[str] = None
+
+class NestedRegisterPayload(BaseModel):
+    role: RoleSection
+    common_fields: CommonFields
+    emergency_contacts: EmergencyContacts
+    admin_registration: AdminRegistration
+
+
 class AssessmentRequest(BaseModel):
     """POST /api/assessment — one-time onboarding from Android."""
     personality_answers: PersonalityAnswers
@@ -127,25 +167,8 @@ class UserCreateRequest(BaseModel):
     model_config = {
         "json_schema_extra": {
             "examples": [
-                {
-                    "summary": "Patient registration",
-                    "value": {
-                        "first_name": "Jane",
-                        "last_name": "Doe",
-                        "email": "jane@example.com",
-                        "password": "Abcd@1234",
-                        "phone_number": "+911234567890",
-                        "is_user": True,
-                        "gender": "female",
-                        "age": 28,
-                        "emergency_contact_name": "John Doe",
-                        "emergency_contact_relation": "Spouse",
-                        "emergency_contact_phone": "+919876543210",
-                    }
-                },
-                {
-                    "summary": "Counselor registration",
-                    "value": {
+                
+                    {
                         "first_name": "Dr. Sarah",
                         "last_name": "Smith",
                         "email": "sarah@clinic.com",
@@ -162,7 +185,10 @@ class UserCreateRequest(BaseModel):
                         "city": "Los Angeles",
                         "state": "CA",
                         "consultation_mode": "In-person",
-                    }
+                        "emergency_contact_name": "John Doe",
+                        "emergency_contact_relation": "Spouse",
+                        "emergency_contact_phone": "+919876543210"
+                    
                 }
             ]
         }

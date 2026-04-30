@@ -27,6 +27,7 @@ from app.api.schemas.request import (
     RefreshTokenRequest,
     ForgotPasswordRequest,
     UserCreateRequest,
+    NestedRegisterPayload,
     UserLoginRequest,
 )
 from app.api.schemas.response import (
@@ -143,6 +144,52 @@ def _build_profile_data(user_doc: dict, user_id: str) -> UserProfileData:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+@router.post("/register/mobile", response_model=UserSignupResponse)
+async def mobile_register(payload: NestedRegisterPayload):
+    """
+    Mobile-specific registration endpoint.
+    Accepts the nested JSON structure required by the mobile team,
+    flattens it, and passes it to the standard validation schema.
+    """
+    flat_data = {
+        "is_user": payload.role.definition.is_user,
+        "first_name": payload.common_fields.first_name,
+        "last_name": payload.common_fields.last_name,
+        "email": payload.common_fields.email,
+        "password": payload.common_fields.password,
+        "gender": payload.common_fields.gender,
+        "age": payload.common_fields.age,
+        "phone_number": payload.common_fields.phone_number,
+    }
+    
+    if flat_data["is_user"]:
+        flat_data.update({
+            "emergency_contact_name": payload.emergency_contacts.emergency_contact_name,
+            "emergency_contact_relation": payload.emergency_contacts.emergency_contact_relation,
+            "emergency_contact_phone": payload.emergency_contacts.emergency_contact_number, # mapping from mobile spec
+        })
+    else:
+        flat_data.update({
+            "city": payload.admin_registration.city,
+            "state": payload.admin_registration.state,
+            "npi_number": payload.admin_registration.npi_number,
+            "professional_role": payload.admin_registration.professional_role,
+            "license_number": payload.admin_registration.license_number,
+            "state_of_licensure": payload.admin_registration.state_of_licensure,
+            "practice_type": payload.admin_registration.practice_type,
+            "consultation_mode": payload.admin_registration.consultation_mode,
+        })
+        
+    try:
+        # Validate through the standard Pydantic schema
+        validated_request = UserCreateRequest(**flat_data)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+        
+    # Delegate to the main standard registration logic
+    return await user_register(validated_request)
+
+
 @router.post("/register", response_model=UserSignupResponse)
 async def user_register(payload: UserCreateRequest):
     """
@@ -163,6 +210,11 @@ async def user_register(payload: UserCreateRequest):
 
         email = payload.email.strip().lower()
         phone_number = payload.phone_number.strip()
+        
+        # Validate phone number has at least 4 digits
+        if len(re.sub(r'\D', '', phone_number)) < 4:
+            raise HTTPException(status_code=400, detail="Phone number must contain at least 4 digits")
+            
         first_name = payload.first_name.strip()
         last_name = payload.last_name.strip()
         full_name = f"{first_name} {last_name}".strip()

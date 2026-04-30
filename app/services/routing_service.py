@@ -57,15 +57,16 @@ def _is_available(counselor_doc: dict) -> bool:
       1. is_online flag is True in DB
       2. Heartbeat is fresh (last_ping within _STALE_PING_SECONDS)
       3. Current sessions < max_concurrent_sessions
-      4. Counselor has an active WebSocket on this server process (Fix 12)
+      4. Counselor has an active Dashboard WebSocket open
     """
+    from app.api.routes.human import manager as ws_manager
     counselor_id = str(counselor_doc.get("_id", ""))
     return (
         counselor_doc.get("is_online", False)
         and _is_fresh(counselor_doc)
         and counselor_doc.get("current_active_sessions", 0)
         < counselor_doc.get("max_concurrent_sessions", 3)
-        and is_counselor_connected(counselor_id)
+        and counselor_id in ws_manager.counselor_ws
     )
 
 
@@ -78,7 +79,7 @@ def _categories_match(current: str, previous: Optional[str]) -> bool:
 async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optional[dict]:
     """
     Pool fallback: returns the least-loaded counselor that passes all availability
-    gates including an active WebSocket connection on this process.
+    gates including an active Dashboard WebSocket connection.
     """
     db = get_database()
     if db is None:
@@ -97,11 +98,12 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
             pass
 
     # Fetch a batch sorted by load; filter to those with active WebSockets
+    from app.api.routes.human import manager as ws_manager
     cursor = db.admins.find(query).sort("current_active_sessions", 1)
     candidates = await cursor.to_list(length=20)
 
     for candidate in candidates:
-        if is_counselor_connected(str(candidate["_id"])):
+        if str(candidate["_id"]) in ws_manager.counselor_ws:
             return candidate
 
     return None

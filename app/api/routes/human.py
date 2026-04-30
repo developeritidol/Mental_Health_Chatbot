@@ -709,7 +709,7 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
                 await websocket.close(code=1011, reason="Internal server error")
                 return
 
-    if not is_escalated:
+        if not is_escalated:
             logger.warning(f"[WS REJECT] Non-escalated user {user_id} attempted handoff connection.")
             # Fix 15: reject at handshake layer
             await websocket.close(code=4003)

@@ -695,8 +695,31 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
     actual_session_id = user_id
 
     # # 4. User path: verify active escalation exists for this user
+    
+    # if role == "user":
+    # is_escalated = False
+    #     if db is not None:
+    #         try:
+    #             session_doc = await db.sessions.find_one(
+    #                 {"user_id": user_id, "is_escalated": True},
+    #                 sort=[("escalated_at", -1)],
+    #             )
+    #             is_escalated = bool(session_doc)
+    #         except Exception as e:
+    #             logger.error(f"[WS] DB error checking escalation for user {user_id}: {e}")
+    #             await websocket.close(code=1011, reason="Internal server error")
+    #             return
+
+    # if not is_escalated:
+    #         logger.warning(f"[WS REJECT] Non-escalated user {user_id} attempted handoff connection.")
+    #         # Fix 15: reject at handshake layer
+    #         await websocket.close(code=4003)
+    #         return
+
+    # 4. User path: verify active escalation exists for this user
     if role == "user":
         is_escalated = False
+
         if db is not None:
             try:
                 session_doc = await db.sessions.find_one(
@@ -709,7 +732,7 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
                 await websocket.close(code=1011, reason="Internal server error")
                 return
 
-    if not is_escalated:
+        if not is_escalated:
             logger.warning(f"[WS REJECT] Non-escalated user {user_id} attempted handoff connection.")
             # Fix 15: reject at handshake layer
             await websocket.close(code=4003)

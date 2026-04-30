@@ -162,6 +162,9 @@ class UserCreateRequest(BaseModel):
                         "city": "Los Angeles",
                         "state": "CA",
                         "consultation_mode": "In-person",
+                        "emergency_contact_name": "John Doe",
+                        "emergency_contact_relation": "Spouse",
+                        "emergency_contact_phone": "+919876543210",
                     }
                 }
             ]

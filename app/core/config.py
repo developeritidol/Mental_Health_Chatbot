@@ -21,7 +21,9 @@ from functools import lru_cache
 from app.core.logger import get_logger
 
 from dotenv import load_dotenv
-load_dotenv()
+# override=True ensures .env values always win over stale OS/shell environment
+# variables, preventing short expiry values set elsewhere from shadowing .env.
+load_dotenv(override=True)
 
 logger = get_logger(__name__)
 
@@ -94,8 +96,13 @@ class Settings(BaseSettings):
 
 @lru_cache()
 def get_settings() -> Settings:
-    logger.debug("Loading application settings")
     settings = Settings()
     if not settings.SECRET_KEY:
         raise RuntimeError("SECRET_KEY must be set")
+    logger.info(
+        f"Settings loaded — "
+        f"ACCESS_TOKEN_EXPIRE_MINUTES={settings.ACCESS_TOKEN_EXPIRE_MINUTES} "
+        f"({settings.ACCESS_TOKEN_EXPIRE_MINUTES / 1440:.1f} days), "
+        f"REFRESH_TOKEN_EXPIRE_DAYS={settings.REFRESH_TOKEN_EXPIRE_DAYS}"
+    )
     return settings

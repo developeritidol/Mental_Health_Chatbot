@@ -160,6 +160,8 @@ class UserLoginResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+    assessment_completed: bool = False
+    session_id: Optional[str] = None
 
 
 class ForgotPasswordResponse(BaseModel):

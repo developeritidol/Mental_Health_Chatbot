@@ -54,6 +54,7 @@ from app.core.auth.JWTtoken import (
 )
 from app.core.auth.token_blacklist import add_to_blacklist
 from app.services.email_service import generate_otp, validate_email, send_otp_email
+from app.services.db_service import get_existing_session
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 logger = get_logger(__name__)
@@ -361,7 +362,18 @@ async def user_login(payload: UserLoginRequest):
 
         user_data = _build_profile_data(user_doc, user_id_str)
 
-        logger.info(f"Login Successful | Role: {user_role}")
+        # Check assessment completion via session existence.
+        # A session is created by the assessment endpoint, so its presence means
+        # the user completed onboarding. Admins skip assessment entirely.
+        if not is_admin:
+            existing_session = await get_existing_session(user_id_str)
+            assessment_completed = existing_session is not None
+            session_id_val = existing_session.get("session_id") if existing_session else None
+        else:
+            assessment_completed = True
+            session_id_val = None
+
+        logger.info(f"Login Successful | Role: {user_role} | Assessment: {assessment_completed}")
 
         return UserLoginResponse(
             status="success",
@@ -369,6 +381,8 @@ async def user_login(payload: UserLoginRequest):
             user=user_data,
             access_token=access_token,
             refresh_token=refresh_token,
+            assessment_completed=assessment_completed,
+            session_id=session_id_val,
         )
 
     except HTTPException:

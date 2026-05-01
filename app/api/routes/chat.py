@@ -65,6 +65,7 @@ def _safe_fallback_consensus() -> dict:
         "category":         "general",
         "intensity":        "moderate",
         "is_crisis":        False,
+        "wants_counselor":  False,
         "crisis_type":      None,
         "reasoning":        "fallback",
         "recommended_tone": "validating",
@@ -262,6 +263,25 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
     except Exception as e:
         logger.error(f"[STEP 2 ERROR] {e}")
         consensus = _safe_fallback_consensus()
+
+    # ── Counselor request detection — user explicitly asked for a human ───────
+    if consensus.get("wants_counselor") is True and not consensus.get("is_crisis"):
+        logger.info(f"[COUNSELOR_REQUEST] User {user_id} requested a human counselor.")
+        counselor_info_payload = {
+            "done": True,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "type": "counselor_request",
+            "message": "There is a button available in the top right corner to directly connect with a human counselor.",
+        }
+
+        async def _counselor_request_stream():
+            yield f"data: {json.dumps(counselor_info_payload)}\n\n"
+
+        return StreamingResponse(
+            _counselor_request_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # ── Fix 1: Crisis fork — EARLY RETURN, AI generator never runs ───────────
     if consensus.get("is_crisis") is True:

@@ -51,67 +51,10 @@ def _is_fresh(counselor_doc: dict) -> bool:
     return (datetime.now(timezone.utc) - last_ping) < timedelta(seconds=_STALE_PING_SECONDS)
 
 
-def _is_available(counselor_doc: dict) -> bool:
-    """
-    Returns True only when ALL four gates pass:
-      1. is_online flag is True in DB
-      2. Heartbeat is fresh (last_ping within _STALE_PING_SECONDS)
-      3. Current sessions < max_concurrent_sessions
-      4. Counselor has an active Dashboard WebSocket open
-    """
-    from app.api.routes.human import manager as ws_manager
-    counselor_id = str(counselor_doc.get("_id", ""))
-    return (
-        counselor_doc.get("is_online", False)
-        and _is_fresh(counselor_doc)
-        and counselor_doc.get("current_active_sessions", 0)
-        < counselor_doc.get("max_concurrent_sessions", 3)
-        and counselor_id in ws_manager.counselor_ws
-    )
-
-
-def _categories_match(current: str, previous: Optional[str]) -> bool:
-    if previous is None:
-        return True
-    return current == previous
-
-
-async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optional[dict]:
-    """
-    Pool fallback: returns the least-loaded counselor that passes all availability
-    gates including an active Dashboard WebSocket connection.
-    """
-    db = get_database()
-    if db is None:
-        return None
-
-    stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=_STALE_PING_SECONDS)
-    query: dict = {
-        "is_online": True,
-        "last_ping": {"$gte": stale_cutoff},
-        "$expr": {"$lt": ["$current_active_sessions", "$max_concurrent_sessions"]},
-    }
-    if exclude_id:
-        try:
-            query["_id"] = {"$ne": ObjectId(exclude_id)}
-        except Exception:
-            pass
-
-    # Fetch a batch sorted by load; filter to those with active WebSockets
-    from app.api.routes.human import manager as ws_manager
-    cursor = db.admins.find(query).sort("current_active_sessions", 1)
-    candidates = await cursor.to_list(length=20)
-
-    for candidate in candidates:
-        if str(candidate["_id"]) in ws_manager.counselor_ws:
-            return candidate
-
-    return None
-
-
 async def get_available_counselor_count() -> int:
     """
-    Returns the number of counselors online, fresh, with capacity, and connected via WebSocket.
+    Returns the number of counselors online, fresh, and with capacity.
+    Source of truth is exclusively MongoDB to support multi-worker environments.
     """
     db = get_database()
     if db is None:
@@ -121,19 +64,15 @@ async def get_available_counselor_count() -> int:
     query: dict = {
         "is_online": True,
         "last_ping": {"$gte": stale_cutoff},
-        "$expr": {"$lt": ["$current_active_sessions", "$max_concurrent_sessions"]},
+        "$expr": {
+            "$lt": [
+                {"$ifNull": ["$current_active_sessions", 0]},
+                {"$ifNull": ["$max_concurrent_sessions", 1]}
+            ]
+        },
     }
     
-    # Fetch a batch and check for active WebSockets
-    from app.api.routes.human import manager as ws_manager
-    cursor = db.admins.find(query).limit(50)
-    candidates = await cursor.to_list(length=50)
-
-    count = 0
-    for candidate in candidates:
-        if str(candidate["_id"]) in ws_manager.counselor_ws:
-            count += 1
-
+    count = await db.admins.count_documents(query)
     return count
 
 
@@ -182,54 +121,9 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
             logger.info(f"[ROUTING] Session {session_id} already being routed — skipping duplicate task.")
             return
 
-        assigned_counselor: Optional[dict] = None
-        preferred_id: Optional[str] = None
-
-        # ── Tier 1: Sticky Routing (via doctor_user_assignments table) ────────
-        # Look up the user's currently active doctor from the assignment table
-        # instead of the legacy preferred_counselor_id field on the user doc.
-        try:
-            user_doc = await db.users.find_one({"_id": ObjectId(user_id)})
-        except Exception:
-            user_doc = None
-        if not user_doc:
-            logger.error(f"[ROUTING] User {user_id} not found — releasing routing lock.")
-            await db.sessions.update_one(
-                {"session_id": session_id, "assigned_counselor_id": "__routing__"},
-                {"$set": {"assigned_counselor_id": None, "routing_started_at": None}},
-            )
-            return
-
-        active_assignment = await db.doctor_user_assignments.find_one(
-            {"user_id": user_id, "status": "active"}
-        )
-        if active_assignment:
-            preferred_id = active_assignment.get("doctor_id")
-
-        if preferred_id and preferred_id == force_exclude_id:
-            preferred_id = None
-
-        if preferred_id:
-            try:
-                preferred_doc = await db.admins.find_one({"_id": ObjectId(preferred_id)})
-            except Exception:
-                preferred_doc = None
-            if preferred_doc:
-                # ── Tier 2: Context Match ────────────────────────────────────
-                if _categories_match(crisis_category, user_doc.get("last_crisis_category")):
-                    # ── Tier 3: Availability Gate ────────────────────────────
-                    if _is_available(preferred_doc):
-                        assigned_counselor = preferred_doc
-                        logger.info(f"[ROUTING] Preferred counselor {preferred_id} selected for session {session_id}.")
-
-        # ── Fallback: Pool Search ─────────────────────────────────────────────
-        if assigned_counselor is None:
-            logger.info(f"[ROUTING] Falling back to pool search for session {session_id}.")
-            exclude_id = preferred_id or force_exclude_id
-            assigned_counselor = await _find_available_counselor(exclude_id=exclude_id)
-
-        # ── No counselors available ───────────────────────────────────────────
-        if assigned_counselor is None:
+        # ── Check Availability ───────────────────────────────────────────────
+        available_count = await get_available_counselor_count()
+        if available_count == 0:
             logger.warning(f"[ROUTING] No counselors available for session {session_id}. Serving hotline message.")
             await db.sessions.update_one(
                 {"session_id": session_id},
@@ -261,60 +155,32 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
                 pass
             return
 
-        counselor_id_str = str(assigned_counselor["_id"])
+        # ── Generate handoff summary in background ────────────────────────────
+        asyncio.create_task(
+            _run_summarization_and_save(user_id, session_id, crisis_category, "comprehensive_summary")
+        )
 
-        # ── Persist assignment — single atomic $set (Fix 8 enhancement) ──────
+        # ── Persist assignment lock as unassigned but ready for claim ──────
         await db.sessions.update_one(
             {"session_id": session_id},
             {"$set": {
-                "assigned_counselor_id": counselor_id_str,
+                "assigned_counselor_id": None,
                 "crisis_category": crisis_category,
-                "assigned_at": datetime.now(timezone.utc),
-                "assignment_complete": True,
                 "routing_started_at": None,
             }},
         )
 
-        # ── Persist to doctor_user_assignments (transactional swap) ───────────
-        # If the selected counselor is different from the current active one,
-        # we must atomically deactivate the old record and insert a new one.
-        # If the same counselor is being reused, no changes to the table needed.
-        is_same_counselor = (preferred_id == counselor_id_str) if preferred_id else False
+        logger.info(f"[ROUTING SUCCESS] Session {session_id} broadcasted to global queue (Category: {crisis_category})")
 
-        if not is_same_counselor:
-            await _swap_assignment(db, user_id, counselor_id_str)
-
-        # ── Determine Handoff Mode ────────────────────────────────────────────
-        if active_assignment is None:
-            handoff_mode = "raw_history"
-        elif is_same_counselor:
-            handoff_mode = "short_summary"
-        else:
-            handoff_mode = "comprehensive_summary"
-
-        # ── Generate handoff summary in background ────────────────────────────
-        asyncio.create_task(
-            _run_summarization_and_save(user_id, session_id, crisis_category, handoff_mode)
-        )
-
-        # ── Update user's routing profile (legacy compat + Tier 2 context) ────
-        try:
-            await db.users.update_one(
-                {"_id": ObjectId(user_id)},
-                {"$set": {
-                    "preferred_counselor_id": counselor_id_str,
-                    "last_crisis_category": crisis_category,
-                }},
-            )
-        except Exception:
-            logger.warning(f"[ROUTING] Could not update preferred counselor for user {user_id}.")
-
-        logger.info(
-            f"[ROUTING] Session {session_id} assigned to counselor {counselor_id_str} "
-            f"(category: {crisis_category})."
-        )
-
-        await _notify_counselor(counselor_id_str, session_id, crisis_category, user_id)
+        # ── Broadcast: queue activity visible to all admins/counselors ────
+        from app.api.routes.human import manager as ws_manager
+        await ws_manager.broadcast_to_dashboard({
+            "type": "new_escalation",
+            "session_id": session_id,
+            "user_id": user_id,
+            "crisis_category": crisis_category,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
 
     except Exception:
         logger.exception(f"[ROUTING] Unhandled error routing session {session_id}")
@@ -329,65 +195,6 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
-
-async def _swap_assignment(db, user_id: str, new_doctor_id: str) -> None:
-    """
-    Atomically swap the user's active doctor assignment using a MongoDB
-    transaction.  Steps inside the transaction:
-      1. Mark any existing active assignment as inactive.
-      2. Insert a new assignment with status=active.
-
-    If transactions are not supported (standalone MongoDB without a replica set),
-    the operations run sequentially — the unique partial index on
-    (user_id + status: active) still prevents duplicate active records.
-    """
-    now = datetime.now(timezone.utc)
-
-    async def _do_swap(session=None):
-        # Step 1: deactivate old assignment (if any)
-        await db.doctor_user_assignments.update_many(
-            {"user_id": user_id, "status": "active"},
-            {"$set": {"status": "inactive"}},
-            session=session,
-        )
-        # Step 2: insert new active assignment
-        await db.doctor_user_assignments.insert_one(
-            {
-                "user_id": user_id,
-                "doctor_id": new_doctor_id,
-                "assigned_at": now,
-                "status": "active",
-            },
-            session=session,
-        )
-
-    try:
-        # Attempt a proper transaction (requires replica set)
-        async with await db.client.start_session() as session:
-            async with session.start_transaction():
-                await _do_swap(session=session)
-        logger.info(
-            f"[ROUTING] Assignment swapped transactionally: "
-            f"user {user_id} → doctor {new_doctor_id}."
-        )
-    except Exception as txn_err:
-        # Standalone MongoDB or network issue — fall back to sequential ops.
-        # The unique partial index still prevents duplicate active records.
-        logger.warning(
-            f"[ROUTING] Transaction unavailable ({txn_err}). "
-            f"Falling back to sequential assignment swap."
-        )
-        try:
-            await _do_swap(session=None)
-            logger.info(
-                f"[ROUTING] Assignment swapped (non-transactional): "
-                f"user {user_id} → doctor {new_doctor_id}."
-            )
-        except Exception:
-            logger.exception(
-                f"[ROUTING] Failed to persist assignment for user {user_id}."
-            )
-
 
 async def _run_summarization_and_save(
     user_id: str,
@@ -408,66 +215,3 @@ async def _run_summarization_and_save(
         logger.info(f"[ROUTING] Handoff summary saved for session {session_id}.")
     except Exception:
         logger.exception(f"[ROUTING] Summarization failed for session {session_id}.")
-
-
-async def _notify_counselor(
-    counselor_id: str,
-    session_id: str,
-    crisis_category: str,
-    user_id: str,
-) -> None:
-    """
-    Sends two notifications:
-    1. Targeted push to the assigned counselor's dashboard WebSocket via notify_counselor().
-       Falls back to broadcast_to_dashboard() if the counselor's socket isn't tracked yet.
-    2. A broadcast to ALL dashboards with type="new_escalation" so other counselors
-       and admins can see live queue activity.
-    """
-    logger.info(
-        f"[ROUTING] [NOTIFY] Counselor {counselor_id} paged for "
-        f"session {session_id} (category: {crisis_category})."
-    )
-    try:
-        from app.core.config import get_settings
-        from app.api.routes.human import manager as ws_manager
-        _settings = get_settings()
-        ws_url = (
-            f"ws://{_settings.SERVER_PUBLIC_HOST}:{_settings.SERVER_PORT}"
-            f"/api/human/chat/{user_id}"
-        )
-
-        # 1 — Targeted: only the assigned counselor
-        assigned_payload = {
-            "type": "counselor_assigned",
-            "counselor_id": counselor_id,
-            "session_id": session_id,
-            "user_id": user_id,
-            "crisis_category": crisis_category,
-            "websocket_url": ws_url,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        delivered = await ws_manager.notify_counselor(counselor_id, assigned_payload)
-        if delivered:
-            logger.info(
-                f"[ROUTING] [NOTIFY] ✓ Targeted assignment push delivered to counselor {counselor_id}."
-            )
-        else:
-            # Dashboard WS not in per-counselor registry — fall back so assignment isn't lost
-            await ws_manager.broadcast_to_dashboard(assigned_payload)
-            logger.warning(
-                f"[ROUTING] [NOTIFY] ⚠  Counselor {counselor_id} not in counselor_ws — "
-                f"used broadcast_to_dashboard fallback."
-            )
-
-        # 2 — Broadcast: queue activity visible to all admins/counselors
-        await ws_manager.broadcast_to_dashboard({
-            "type": "new_escalation",
-            "assigned_counselor_id": counselor_id,
-            "session_id": session_id,
-            "user_id": user_id,
-            "crisis_category": crisis_category,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-
-    except Exception as e:
-        logger.warning(f"[ROUTING] Dashboard notification failed for counselor {counselor_id}: {e}")

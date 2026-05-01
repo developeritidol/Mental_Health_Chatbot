@@ -200,6 +200,7 @@ class ConnectionManager:
         # counselor_id → list of their active dashboard WebSocket(s)
         # Allows targeted push to a specific counselor without broadcasting to everyone
         self.counselor_ws: dict[str, list[WebSocket]] = {}
+        self.active_chats: dict[str, int] = {}
         self.timeout_tasks: dict[str, asyncio.Task] = {}
 
     def start_timeout_task(self, user_id: str, task: asyncio.Task):
@@ -266,6 +267,7 @@ class ConnectionManager:
         if counselor_id:
             self.counselor_ws.setdefault(counselor_id, []).append(ws)
         logger.info(f"[WS] Admin dashboard connected. Total: {len(self.dashboard_clients)}")
+        self.log_state(f"Dashboard Connected ({counselor_id})")
 
     def disconnect_dashboard(self, ws: WebSocket, counselor_id: Optional[str] = None):
         self.dashboard_clients.discard(ws)
@@ -276,6 +278,13 @@ class ConnectionManager:
             if not self.counselor_ws[counselor_id]:
                 del self.counselor_ws[counselor_id]
         logger.info(f"[WS] Admin dashboard disconnected. Total: {len(self.dashboard_clients)}")
+        self.log_state(f"Dashboard Disconnected ({counselor_id})")
+
+    def log_state(self, action: str):
+        total_online = len(self.counselor_ws)
+        busy = sum(1 for cid in self.counselor_ws if self.active_chats.get(cid, 0) > 0)
+        available = total_online - busy
+        logger.info(f"[WS STATE X-RAY] {action} | Total Online: {total_online} | Busy: {busy} | Available: {available}")
 
     async def broadcast_to_dashboard(self, payload: dict):
         """Send to ALL connected dashboard clients (e.g. new escalation alert)."""
@@ -289,7 +298,12 @@ class ConnectionManager:
             except Exception:
                 dead.add(ws)
         for ws in dead:
-            self.disconnect_dashboard(ws)
+            counselor_id = None
+            for cid, wss in self.counselor_ws.items():
+                if ws in wss:
+                    counselor_id = cid
+                    break
+            self.disconnect_dashboard(ws, counselor_id)
 
     async def notify_counselor(self, counselor_id: str, payload: dict) -> bool:
         """
@@ -596,6 +610,10 @@ async def dashboard_notifications_ws(websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info(f"[WS DASHBOARD] ✗ DISCONNECTED | counselor_id={counselor_id or 'anonymous'}")
         manager.disconnect_dashboard(websocket, counselor_id=counselor_id)
+    except asyncio.CancelledError:
+        logger.info(f"[WS DASHBOARD] ✗ CANCELLED | counselor_id={counselor_id or 'anonymous'}")
+        manager.disconnect_dashboard(websocket, counselor_id=counselor_id)
+        raise
     except Exception as e:
         logger.error(
             f"[WS DASHBOARD] ✗ UNHANDLED ERROR | counselor_id={counselor_id or 'anonymous'} | error={e}",
@@ -611,25 +629,27 @@ async def dashboard_notifications_ws(websocket: WebSocket):
             heartbeat_task.cancel()
         if counselor_id and db is not None:
             mark_counselor_disconnected(counselor_id)
-            try:
-                # Only go offline if not currently in an active patient session
-                updated = await db.admins.find_one({"_id": ObjectId(counselor_id)})
-                if updated and updated.get("current_active_sessions", 0) <= 0:
-                    await db.admins.update_one(
-                        {"_id": ObjectId(counselor_id)},
-                        {"$set": {"is_online": False}},
-                    )
-                    logger.info(
-                        f"[WS DASHBOARD] Counselor {counselor_id} is now OFFLINE | status=unavailable for routing"
-                    )
-                else:
-                    active = (updated or {}).get("current_active_sessions", 0)
-                    logger.info(
-                        f"[WS DASHBOARD] Counselor {counselor_id} dashboard closed but stays ONLINE"
-                        f" | active_sessions={active}"
-                    )
-            except Exception as e:
-                logger.warning(f"[WS DASHBOARD] Could not clear online status for {counselor_id}: {e}")
+            async def _db_cleanup():
+                try:
+                    # Only go offline if not currently in an active patient session
+                    updated = await db.admins.find_one({"_id": ObjectId(counselor_id)})
+                    if updated and updated.get("current_active_sessions", 0) <= 0:
+                        await db.admins.update_one(
+                            {"_id": ObjectId(counselor_id)},
+                            {"$set": {"is_online": False}},
+                        )
+                        logger.info(
+                            f"[WS DASHBOARD] Counselor {counselor_id} is now OFFLINE | status=unavailable for routing"
+                        )
+                    else:
+                        active = (updated or {}).get("current_active_sessions", 0)
+                        logger.info(
+                            f"[WS DASHBOARD] Counselor {counselor_id} dashboard closed but stays ONLINE"
+                            f" | active_sessions={active}"
+                        )
+                except Exception as e:
+                    logger.warning(f"[WS DASHBOARD] Could not clear online status for {counselor_id}: {e}")
+            asyncio.create_task(_db_cleanup())
 
 
 # ── Human Chat WebSocket ──────────────────────────────────────────────────────
@@ -746,10 +766,24 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
     # 6. Accept WebSocket and register
     await manager.connect(user_id, websocket)
     if role == "human_counselor":
-        logger.info(
-            f"[WS CHAT] ✓ CONNECTED | role=counselor | room={user_id}"
-            f" | counselor_id={authenticated_user_id} | name={counselor_name}"
-        )
+        if user_id == authenticated_user_id:
+            # Waiting Room
+            manager.active_chats[authenticated_user_id] = 0
+            manager.dashboard_clients.add(websocket)
+            manager.counselor_ws.setdefault(authenticated_user_id, []).append(websocket)
+            logger.info(
+                f"[WS CHAT] ✓ CONNECTED | role=counselor | room={user_id} (WAITING ROOM)"
+                f" | counselor_id={authenticated_user_id} | name={counselor_name}"
+            )
+            manager.log_state(f"Waiting Room Joined ({authenticated_user_id})")
+        else:
+            # Chat Room
+            manager.active_chats[authenticated_user_id] = manager.active_chats.get(authenticated_user_id, 0) + 1
+            logger.info(
+                f"[WS CHAT] ✓ CONNECTED | role=counselor | room={user_id} (ESCALATION CHAT)"
+                f" | counselor_id={authenticated_user_id} | name={counselor_name}"
+            )
+            manager.log_state(f"Chat Joined ({authenticated_user_id})")
     else:
         logger.info(
             f"[WS CHAT] ✓ CONNECTED | role=user | room={user_id} | user_id={authenticated_user_id}"
@@ -778,13 +812,30 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
 
         if db is not None:
             try:
-                await db.admins.update_one(
-                    {"_id": ObjectId(authenticated_user_id)},
-                    {
-                        "$set": {"is_online": True, "last_ping": datetime.now(timezone.utc)},
-                        "$inc": {"current_active_sessions": 1},
-                    },
-                )
+                if user_id == authenticated_user_id:
+                    # Waiting Room: They are online and have 0 active sessions.
+                    await db.admins.update_one(
+                        {"_id": ObjectId(authenticated_user_id)},
+                        {
+                            "$set": {
+                                "is_online": True, 
+                                "current_active_sessions": 0,
+                                "last_ping": datetime.now(timezone.utc)
+                            }
+                        },
+                    )
+                else:
+                    # Private Chat: They are online and have 1 active session.
+                    await db.admins.update_one(
+                        {"_id": ObjectId(authenticated_user_id)},
+                        {
+                            "$set": {
+                                "is_online": True, 
+                                "current_active_sessions": 1,
+                                "last_ping": datetime.now(timezone.utc)
+                            }
+                        },
+                    )
             except Exception as e:
                 logger.warning(f"[WS] Could not update presence for counselor {authenticated_user_id}: {e}")
 
@@ -911,6 +962,10 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
         }
         await manager.broadcast(user_id, leave_notice, websocket)
 
+    except asyncio.CancelledError:
+        manager.disconnect(user_id, websocket)
+        raise
+
     except Exception as e:
         logger.error(
             f"[WS CHAT] ✗ UNHANDLED ERROR | room={user_id} | role={role}"
@@ -928,32 +983,45 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
             heartbeat_task.cancel()
 
         if role == "human_counselor":
+            if user_id == authenticated_user_id:
+                # Waiting Room Left
+                manager.disconnect_dashboard(websocket, counselor_id=authenticated_user_id)
+                manager.log_state(f"Waiting Room Left ({authenticated_user_id})")
+            else:
+                # Chat Room Left
+                manager.active_chats[authenticated_user_id] = manager.active_chats.get(authenticated_user_id, 1) - 1
+                if manager.active_chats[authenticated_user_id] <= 0:
+                    manager.active_chats.pop(authenticated_user_id, None)
+                manager.log_state(f"Chat Left ({authenticated_user_id})")
+
             # Decrement ref-count in registry; counselor stays connected if dashboard is still open
             mark_counselor_disconnected(authenticated_user_id)
 
             if db is not None:
-                try:
-                    # Only decrement the session counter — is_online is owned by the dashboard WebSocket
-                    await db.admins.update_one(
-                        {"_id": ObjectId(authenticated_user_id), "current_active_sessions": {"$gt": 0}},
-                        {"$inc": {"current_active_sessions": -1}},
-                    )
-                except Exception as e:
-                    logger.error(f"[WS] Failed to clean up presence for counselor {authenticated_user_id}: {e}")
-
-                if actual_session_id != user_id:
+                async def _chat_db_cleanup():
                     try:
-                        await db.sessions.update_one(
-                            {"session_id": actual_session_id},
-                            {"$set": {
-                                "is_escalated": False,
-                                "assigned_counselor_id": None,
-                                "escalation_closed_at": datetime.now(timezone.utc),
-                                "updated_at": datetime.now(timezone.utc),
-                            }},
+                        # Fully sync DB state to disconnected on WebSocket close
+                        await db.admins.update_one(
+                            {"_id": ObjectId(authenticated_user_id)},
+                            {"$set": {"is_online": False, "current_active_sessions": 0}},
                         )
                     except Exception as e:
-                        logger.error(f"[WS] Failed to close escalation for session {actual_session_id}: {e}")
+                        logger.error(f"[WS] Failed to clean up presence for counselor {authenticated_user_id}: {e}")
+
+                    if actual_session_id != user_id:
+                        try:
+                            await db.sessions.update_one(
+                                {"session_id": actual_session_id},
+                                {"$set": {
+                                    "is_escalated": False,
+                                    "assigned_counselor_id": None,
+                                    "escalation_closed_at": datetime.now(timezone.utc),
+                                    "updated_at": datetime.now(timezone.utc),
+                                }},
+                            )
+                        except Exception as e:
+                            logger.error(f"[WS] Failed to close escalation for session {actual_session_id}: {e}")
+                asyncio.create_task(_chat_db_cleanup())
 
 
 async def _counselor_heartbeat(counselor_id: str) -> None:

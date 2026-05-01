@@ -109,6 +109,34 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
     return None
 
 
+async def get_available_counselor_count() -> int:
+    """
+    Returns the number of counselors online, fresh, with capacity, and connected via WebSocket.
+    """
+    db = get_database()
+    if db is None:
+        return 0
+
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=_STALE_PING_SECONDS)
+    query: dict = {
+        "is_online": True,
+        "last_ping": {"$gte": stale_cutoff},
+        "$expr": {"$lt": ["$current_active_sessions", "$max_concurrent_sessions"]},
+    }
+    
+    # Fetch a batch and check for active WebSockets
+    from app.api.routes.human import manager as ws_manager
+    cursor = db.admins.find(query).limit(50)
+    candidates = await cursor.to_list(length=50)
+
+    count = 0
+    for candidate in candidates:
+        if str(candidate["_id"]) in ws_manager.counselor_ws:
+            count += 1
+
+    return count
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -> None:

@@ -36,6 +36,7 @@ from app.services.db_service import (
     get_existing_session,
     upsert_session,
 )
+from app.services.routing_service import get_available_counselor_count
 from app.api.routes.human import manager
 
 logger = get_logger(__name__)
@@ -71,6 +72,22 @@ def _safe_fallback_consensus() -> dict:
     }
 
 
+# ── Counselor Status API ────────────────────────────────────────────────────────
+
+@router.get("/counselor-status")
+async def get_counselor_status(current_user = Depends(get_current_user)):
+    """
+    Checks if there is at least one counselor online.
+    Used by the frontend to determine if chat can be started.
+    """
+    count = await get_available_counselor_count()
+    return {
+        "status": "success",
+        "is_counselor_online": count > 0,
+        "online_counselors_count": count
+    }
+
+
 # ── SSE Stream ─────────────────────────────────────────────────────────────────
 
 @router.post("/stream")
@@ -85,6 +102,23 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
     """
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
+
+    # Check counselor availability before allowing chat to start/continue
+    count = await get_available_counselor_count()
+    if count == 0:
+        error_payload = {
+            "error": True,
+            "message": "Chat is currently unavailable because no counselors are online. Please try again later.",
+            "type": "counselors_offline"
+        }
+        async def _offline_stream():
+            yield f"data: {json.dumps(error_payload)}\n\n"
+            
+        return StreamingResponse(
+            _offline_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # FC7: identity from JWT only — client no longer sends user_id in body
     user_id = str(current_user.get("user_id") or current_user.get("_id"))

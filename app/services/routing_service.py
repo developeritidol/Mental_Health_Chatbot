@@ -89,7 +89,6 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
     query: dict = {
         "is_online": True,
         "last_ping": {"$gte": stale_cutoff},
-        "$expr": {"$lt": ["$current_active_sessions", "$max_concurrent_sessions"]},
     }
     if exclude_id:
         try:
@@ -103,7 +102,9 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
     candidates = await cursor.to_list(length=20)
 
     for candidate in candidates:
-        if str(candidate["_id"]) in ws_manager.counselor_ws:
+        active = candidate.get("current_active_sessions", 0)
+        max_cap = candidate.get("max_concurrent_sessions", 3)
+        if active < max_cap and str(candidate["_id"]) in ws_manager.counselor_ws:
             return candidate
 
     return None
@@ -121,7 +122,6 @@ async def get_available_counselor_count() -> int:
     query: dict = {
         "is_online": True,
         "last_ping": {"$gte": stale_cutoff},
-        "$expr": {"$lt": ["$current_active_sessions", "$max_concurrent_sessions"]},
     }
     
     # Fetch a batch and check for active WebSockets
@@ -131,7 +131,9 @@ async def get_available_counselor_count() -> int:
 
     count = 0
     for candidate in candidates:
-        if str(candidate["_id"]) in ws_manager.counselor_ws:
+        active = candidate.get("current_active_sessions", 0)
+        max_cap = candidate.get("max_concurrent_sessions", 3)
+        if active < max_cap and str(candidate["_id"]) in ws_manager.counselor_ws:
             count += 1
 
     return count

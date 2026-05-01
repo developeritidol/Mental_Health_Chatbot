@@ -160,23 +160,6 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
-    # Check counselor availability before allowing chat to start/continue
-    count = await get_available_counselor_count()
-    if count == 0:
-        error_payload = {
-            "error": True,
-            "message": "Chat is currently unavailable because no counselors are online. Please try again later.",
-            "type": "counselors_offline"
-        }
-        async def _offline_stream():
-            yield f"data: {json.dumps(error_payload)}\n\n"
-            
-        return StreamingResponse(
-            _offline_stream(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
-
     # FC7: identity from JWT only — client no longer sends user_id in body
     user_id = str(current_user.get("user_id") or current_user.get("_id"))
 

@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 # Schemas
-from app.api.schemas.request import StreamChatRequest, ManualEscalationRequest
+from app.api.schemas.request import StreamChatRequest
 from app.api.schemas.response import (
     ChatHistoryResponse,
     ChatMessageResponse,
@@ -92,18 +92,20 @@ async def get_counselor_status(current_user = Depends(get_current_user)):
 
 @router.post("/manual-escalate")
 async def manual_escalate(
-    req: ManualEscalationRequest, 
     current_user = Depends(get_current_user)
 ):
     """
     Triggered by the Android app when the user clicks 'Connect to Counselor'.
-    Immediately sets the session to escalated and routes to a human.
+    Requires NO request body. Fetches the active session and routes to a human.
     """
     user_id = str(current_user.get("user_id") or current_user.get("_id"))
-    actual_session_id = req.session_id
-
-    # 1. Ensure the session exists in DB
-    await upsert_session(user_id, actual_session_id)
+    
+    # 1. Fetch the user's active session instead of requiring it from the body
+    session_data = await get_existing_session(user_id)
+    if not session_data:
+        raise HTTPException(status_code=400, detail="No active chat session found to escalate.")
+        
+    actual_session_id = session_data["session_id"]
 
     # 2. Mark the session as escalated (is_escalated = True)
     success = await escalate_session(actual_session_id)
@@ -115,7 +117,7 @@ async def manual_escalate(
         "is_crisis": True,
         "category": "manual_escalation",
         "intensity": "high",
-        "reasoning": req.reason,
+        "reasoning": "User requested manual escalation via app button",
     }
 
     # 4. Trigger the smart routing engine in the background
@@ -137,15 +139,9 @@ async def manual_escalate(
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }))
 
-    # 6. Return WebSocket info so Android can immediately redirect
-    from app.core.config import get_settings
-    _settings = get_settings()
-    ws_url = f"ws://{_settings.SERVER_PUBLIC_HOST}:{_settings.SERVER_PORT}/api/human/chat/{user_id}"
-
+    # 6. Return strictly what the Android team requested
     return {
-        "status": "success",
-        "message": "Escalation triggered. Connecting to counselor.",
-        "websocket_url": ws_url
+        "status": "success"
     }
 
 

@@ -257,3 +257,8 @@ class StreamChatRequest(BaseModel):
     """
     session_id: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1, max_length=2000)
+
+
+class ManualEscalationRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+    reason: Optional[str] = Field(default="User triggered manual escalation", description="Optional reason provided by the user")

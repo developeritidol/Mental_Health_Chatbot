@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 # Schemas
-from app.api.schemas.request import StreamChatRequest
+from app.api.schemas.request import StreamChatRequest, ManualEscalationRequest
 from app.api.schemas.response import (
     ChatHistoryResponse,
     ChatMessageResponse,
@@ -85,6 +85,67 @@ async def get_counselor_status(current_user = Depends(get_current_user)):
         "status": "success",
         "is_counselor_online": count > 0,
         "online_counselors_count": count
+    }
+
+
+# ── Manual Escalation ─────────────────────────────────────────────────────────
+
+@router.post("/manual-escalate")
+async def manual_escalate(
+    req: ManualEscalationRequest, 
+    current_user = Depends(get_current_user)
+):
+    """
+    Triggered by the Android app when the user clicks 'Connect to Counselor'.
+    Immediately sets the session to escalated and routes to a human.
+    """
+    user_id = str(current_user.get("user_id") or current_user.get("_id"))
+    actual_session_id = req.session_id
+
+    # 1. Ensure the session exists in DB
+    await upsert_session(user_id, actual_session_id)
+
+    # 2. Mark the session as escalated (is_escalated = True)
+    success = await escalate_session(actual_session_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to escalate session")
+
+    # 3. Create a pseudo-consensus to feed into the routing engine
+    consensus = {
+        "is_crisis": True,
+        "category": "manual_escalation",
+        "intensity": "high",
+        "reasoning": req.reason,
+    }
+
+    # 4. Trigger the smart routing engine in the background
+    from app.services.routing_service import route_crisis_session
+    asyncio.create_task(
+        route_crisis_session(
+            user_id=user_id,
+            session_id=actual_session_id,
+            consensus=consensus,
+        )
+    )
+
+    # 5. Broadcast to all human dashboards so they see the queue activity
+    asyncio.create_task(manager.broadcast_to_dashboard({
+        "type": "new_escalation",
+        "session_id": actual_session_id,
+        "user_id": user_id,
+        "crisis_category": "manual_escalation",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }))
+
+    # 6. Return WebSocket info so Android can immediately redirect
+    from app.core.config import get_settings
+    _settings = get_settings()
+    ws_url = f"ws://{_settings.SERVER_PUBLIC_HOST}:{_settings.SERVER_PORT}/api/human/chat/{user_id}"
+
+    return {
+        "status": "success",
+        "message": "Escalation triggered. Connecting to counselor.",
+        "websocket_url": ws_url
     }
 
 

@@ -10,7 +10,7 @@ from app.services.emotion import warmup
 from app.core.database import connect_to_mongo, close_mongo_connection
 from app.core.config import get_settings
 from app.core.logger import get_logger
-from app.api.routes import chat, audio, assessment, human, user
+from app.api.routes import chat, audio, assessment, human, user, doctor
 
 logger = get_logger("main")
 settings = get_settings()
@@ -31,7 +31,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Model warmup skipped: {e}")
         
-    # 3. Start Global 35-minute Inactivity Watchdog
+    # 3. Start Distributed Notification Listener (Fix 14 Distributed Refactor)
+    # Listens to MongoDB Change Streams for cross-worker events.
+    from app.services.notification_service import NotificationService
+    from app.api.routes.human import manager
+    try:
+        loop.create_task(NotificationService.listen_for_notifications(manager))
+    except Exception as e:
+        logger.error(f"Failed to start notification listener: {e}")
+
+    # 4. Start Global 35-minute Inactivity Watchdog
     try:
         loop.create_task(human.inactivity_watchdog())
     except Exception as e:
@@ -64,6 +73,7 @@ app.include_router(audio.router)
 app.include_router(assessment.router)
 app.include_router(human.router)
 app.include_router(user.router)
+app.include_router(doctor.router)
 
 # ── Static files (UI) ─────────────────────────────────────────────────────────
 app.mount("/static", StaticFiles(directory="app/static"), name="static")

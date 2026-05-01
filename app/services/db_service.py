@@ -330,6 +330,11 @@ async def close_escalation(session_id: str) -> bool:
     if db is None:
         return False
     try:
+        # 1. Fetch the counselor ID before clearing it to release their capacity slot
+        session_doc = await db.sessions.find_one({"session_id": session_id})
+        counselor_id = (session_doc or {}).get("assigned_counselor_id")
+
+        # 2. Close the escalation in the session document
         await db.sessions.update_one(
             {"session_id": session_id},
             {"$set": {
@@ -339,6 +344,19 @@ async def close_escalation(session_id: str) -> bool:
                 "updated_at": datetime.now(timezone.utc),
             }},
         )
+
+        # 3. Release the counselor's capacity slot (Zero-Stale-State Protocol)
+        if counselor_id and counselor_id != "__routing__":
+            try:
+                from bson import ObjectId
+                await db.admins.update_one(
+                    {"_id": ObjectId(counselor_id), "current_active_sessions": {"$gt": 0}},
+                    {"$inc": {"current_active_sessions": -1}},
+                )
+                logger.info(f"[CAPACITY] Released slot for counselor {counselor_id} (Session {session_id} closed)")
+            except Exception as e:
+                logger.error(f"[CAPACITY] Failed to release slot for {counselor_id}: {e}")
+
         logger.info(f"[ESCALATION CLOSED] Session {session_id} returned to AI mode.")
         return True
     except Exception as e:

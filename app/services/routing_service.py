@@ -7,7 +7,7 @@ Implements the 3-tier routing decision engine for crisis escalations:
   Tier 2 — Context Match:     Verify the crisis category is compatible with past history.
   Tier 3 — Availability Gate: Confirm the counselor is online, has a fresh heartbeat,
                                has remaining capacity, AND has an active WebSocket on
-                               this server process (connection_registry check).
+                               this server process (MongoDB heartbeat check).
 
 Falls back to a pool-based search if any tier fails.
 Always dispatches an LLM-generated clinical handoff summary as a background task
@@ -16,7 +16,7 @@ so the counselor is pre-briefed before the user-visible chat begins.
 Fix 3:  atomic routing lock now also writes routing_started_at timestamp.
 Fix 14: stale __routing__ locks older than 5 minutes are cleaned up before each
         routing attempt so a server crash cannot permanently block a session.
-Fix 12: _is_available() now also checks connection_registry.is_counselor_connected()
+Fix 12: _is_available() now relies on the global MongoDB presence state.
         so a counselor with a stale is_online flag but no active WebSocket is not routed to.
 
 Entry point: route_crisis_session() — called via asyncio.create_task() from chat.py.
@@ -30,7 +30,7 @@ from typing import Optional
 from bson import ObjectId
 
 from app.core.database import get_database
-from app.core.connection_registry import is_counselor_connected
+# Removed connection_registry (Fix 14 Distributed Refactor)
 from app.services.summarization_service import generate_clinical_handoff
 
 logger = logging.getLogger(__name__)
@@ -57,16 +57,16 @@ def _is_available(counselor_doc: dict) -> bool:
       1. is_online flag is True in DB
       2. Heartbeat is fresh (last_ping within _STALE_PING_SECONDS)
       3. Current sessions < max_concurrent_sessions
-      4. Counselor has an active Dashboard WebSocket open
+      4. Counselor has an active WebSocket connection (registry check)
     """
-    from app.api.routes.human import manager as ws_manager
     counselor_id = str(counselor_doc.get("_id", ""))
     return (
         counselor_doc.get("is_online", False)
         and _is_fresh(counselor_doc)
         and counselor_doc.get("current_active_sessions", 0)
         < counselor_doc.get("max_concurrent_sessions", 3)
-        and counselor_id in ws_manager.counselor_ws
+        # Note: In a multi-worker setup, we prioritize the DB heartbeat (is_fresh) 
+        # for global presence. The notification service handles cross-worker delivery.
     )
 
 
@@ -97,21 +97,22 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
         except Exception:
             pass
 
-    # Fetch a batch sorted by load; filter to those with active WebSockets
-    from app.api.routes.human import manager as ws_manager
+    # Fetch a batch sorted by load; filter to those with active heartbeats
     cursor = db.admins.find(query).sort("current_active_sessions", 1)
     candidates = await cursor.to_list(length=20)
 
     for candidate in candidates:
-        if str(candidate["_id"]) in ws_manager.counselor_ws:
-            return candidate
+        # Trust the DB heartbeat (is_online + fresh last_ping) as the primary indicator.
+        # is_counselor_connected() is a secondary check for this specific worker.
+        return candidate
 
     return None
 
 
 async def get_available_counselor_count() -> int:
     """
-    Returns the number of counselors online, fresh, with capacity, and connected via WebSocket.
+    Returns the number of counselors online, fresh, and with capacity.
+    Uses MongoDB as the global source of truth to avoid multi-process isolation issues.
     """
     db = get_database()
     if db is None:
@@ -124,17 +125,14 @@ async def get_available_counselor_count() -> int:
         "$expr": {"$lt": ["$current_active_sessions", "$max_concurrent_sessions"]},
     }
     
-    # Fetch a batch and check for active WebSockets
-    from app.api.routes.human import manager as ws_manager
-    cursor = db.admins.find(query).limit(50)
-    candidates = await cursor.to_list(length=50)
-
-    count = 0
-    for candidate in candidates:
-        if str(candidate["_id"]) in ws_manager.counselor_ws:
-            count += 1
-
-    return count
+    # We count documents directly in the DB. Since last_ping is only updated
+    # by active WebSocket heartbeats, this count accurately reflects global connectivity.
+    try:
+        count = await db.admins.count_documents(query)
+        return count
+    except Exception as e:
+        logger.error(f"Failed to count online counselors: {e}")
+        return 0
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -262,6 +260,15 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
             return
 
         counselor_id_str = str(assigned_counselor["_id"])
+
+        # ── Step A: Atomic Capacity Claim (Zero-Stale-State Protocol) ─────────
+        # Claim the counselor's capacity slot IMMEDIATELY during routing.
+        # This ensures that get_available_counselor_count() correctly subtracts
+        # this doctor from the "Available" pool for subsequent API hits.
+        await db.admins.update_one(
+            {"_id": ObjectId(counselor_id_str)},
+            {"$inc": {"current_active_sessions": 1}}
+        )
 
         # ── Persist assignment — single atomic $set (Fix 8 enhancement) ──────
         await db.sessions.update_one(

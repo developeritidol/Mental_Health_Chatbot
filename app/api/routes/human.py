@@ -25,7 +25,8 @@ from bson import ObjectId
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends, status
 from app.core.auth.JWTtoken import verify_token
 from app.core.database import get_database
-from app.core.connection_registry import mark_counselor_connected, mark_counselor_disconnected
+from app.services.notification_service import NotificationService, WORKER_ID
+# Removed connection_registry (Distributed Refactor)
 from app.services.db_service import (
     save_message,
     get_escalated_sessions,
@@ -201,6 +202,8 @@ class ConnectionManager:
         # Allows targeted push to a specific counselor without broadcasting to everyone
         self.counselor_ws: dict[str, list[WebSocket]] = {}
         self.timeout_tasks: dict[str, asyncio.Task] = {}
+        self.has_human: dict[str, bool] = {}
+        self.worker_id = WORKER_ID
 
     def start_timeout_task(self, user_id: str, task: asyncio.Task):
         self.timeout_tasks[user_id] = task
@@ -278,7 +281,21 @@ class ConnectionManager:
         logger.info(f"[WS] Admin dashboard disconnected. Total: {len(self.dashboard_clients)}")
 
     async def broadcast_to_dashboard(self, payload: dict):
-        """Send to ALL connected dashboard clients (e.g. new escalation alert)."""
+        """
+        GLOBAL BROADCAST (Multi-worker safe): 
+        Publishes event to MongoDB; all workers will detect it and push locally.
+        """
+        await NotificationService.publish_notification(
+            target_id=None,
+            payload=payload,
+            broadcast=True
+        )
+
+    async def broadcast_locally(self, payload: dict):
+        """
+        LOCAL BROADCAST: Actually delivers to WebSockets on THIS specific worker.
+        Called by NotificationService listener.
+        """
         if not self.dashboard_clients:
             return
         message = json.dumps(payload)
@@ -293,25 +310,33 @@ class ConnectionManager:
 
     async def notify_counselor(self, counselor_id: str, payload: dict) -> bool:
         """
-        Send a targeted push to a specific counselor's dashboard WebSocket(s).
-        Returns True if at least one message was delivered, False if the counselor
-        has no active dashboard connection.
+        GLOBAL NOTIFY (Multi-worker safe):
+        Publishes targeted event to MongoDB.
+        """
+        await NotificationService.publish_notification(
+            target_id=counselor_id,
+            payload=payload,
+            broadcast=False
+        )
+        return True
+
+    async def notify_locally(self, counselor_id: str, payload: dict):
+        """
+        LOCAL NOTIFY: Actually delivers to a targeted counselor on THIS specific worker.
+        Called by NotificationService listener.
         """
         targets = self.counselor_ws.get(counselor_id, []).copy()
         if not targets:
-            return False
+            return
         message = json.dumps(payload)
-        delivered = False
         dead = []
         for ws in targets:
             try:
                 await ws.send_text(message)
-                delivered = True
             except Exception:
                 dead.append(ws)
         for ws in dead:
             self.disconnect_dashboard(ws, counselor_id)
-        return delivered
 
 
 manager = ConnectionManager()
@@ -563,12 +588,17 @@ async def dashboard_notifications_ws(websocket: WebSocket):
     heartbeat_task: Optional[asyncio.Task] = None
 
     if counselor_id and db is not None:
-        mark_counselor_connected(counselor_id)
-        counselor_display = counselor_id  # fallback; overwrite if DB lookup succeeds
+        counselor_display = counselor_id
         try:
             await db.admins.update_one(
                 {"_id": ObjectId(counselor_id)},
-                {"$set": {"is_online": True, "last_ping": datetime.now(timezone.utc)}},
+                {
+                    "$set": {
+                        "is_online": True, 
+                        "last_ping": datetime.now(timezone.utc),
+                        "worker_id": WORKER_ID
+                    },
+                },
             )
             # Fetch name for log readability
             admin_doc = await db.admins.find_one(
@@ -584,7 +614,7 @@ async def dashboard_notifications_ws(websocket: WebSocket):
             )
         except Exception as e:
             logger.warning(f"[WS DASHBOARD] Could not set online status for {counselor_id}: {e}")
-        heartbeat_task = asyncio.create_task(_counselor_heartbeat(counselor_id))
+        heartbeat_task = asyncio.create_task(_counselor_heartbeat(counselor_id, token))
     else:
         logger.info(f"[WS DASHBOARD] ✓ CONNECTED | role=anonymous monitor | ip={dashboard_ip}")
 
@@ -610,7 +640,6 @@ async def dashboard_notifications_ws(websocket: WebSocket):
         if heartbeat_task is not None:
             heartbeat_task.cancel()
         if counselor_id and db is not None:
-            mark_counselor_disconnected(counselor_id)
             try:
                 # Only go offline if not currently in an active patient session
                 updated = await db.admins.find_one({"_id": ObjectId(counselor_id)})
@@ -771,16 +800,16 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
 
     # 8. Counselor: update presence, write confirmed session assignment, send handoff brief
     if role == "human_counselor":
-        # Fix 12: register in connection registry for routing availability check
-        mark_counselor_connected(authenticated_user_id)
-
         if db is not None:
             try:
                 await db.admins.update_one(
                     {"_id": ObjectId(authenticated_user_id)},
                     {
-                        "$set": {"is_online": True, "last_ping": datetime.now(timezone.utc)},
-                        "$inc": {"current_active_sessions": 1},
+                        "$set": {
+                            "is_online": True, 
+                            "last_ping": datetime.now(timezone.utc),
+                            "worker_id": WORKER_ID
+                        },
                     },
                 )
             except Exception as e:
@@ -797,7 +826,7 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
                 except Exception as e:
                     logger.warning(f"[WS] Could not confirm counselor ID for session {actual_session_id}: {e}")
 
-        heartbeat_task = asyncio.create_task(_counselor_heartbeat(authenticated_user_id))
+        heartbeat_task = asyncio.create_task(_counselor_heartbeat(authenticated_user_id, token))
 
         manager.mark_human_joined(user_id)
         manager.cancel_timeout_task(user_id)
@@ -926,52 +955,50 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
             heartbeat_task.cancel()
 
         if role == "human_counselor":
-            # Decrement ref-count in registry; counselor stays connected if dashboard is still open
-            mark_counselor_disconnected(authenticated_user_id)
-
             if db is not None:
+                # If this was a direct patient room (user_id == actual_session_id), 
+                # we clear the escalation as part of the Zero-Stale-State protocol.
                 try:
-                    # Only decrement the session counter — is_online is owned by the dashboard WebSocket
-                    await db.admins.update_one(
-                        {"_id": ObjectId(authenticated_user_id), "current_active_sessions": {"$gt": 0}},
-                        {"$inc": {"current_active_sessions": -1}},
+                    await db.sessions.update_one(
+                        {"session_id": actual_session_id},
+                        {"$set": {
+                            "is_escalated": False,
+                            "assigned_counselor_id": None,
+                            "escalation_closed_at": datetime.now(timezone.utc),
+                            "updated_at": datetime.now(timezone.utc),
+                        }},
                     )
                 except Exception as e:
-                    logger.error(f"[WS] Failed to clean up presence for counselor {authenticated_user_id}: {e}")
-
-                if actual_session_id != user_id:
-                    try:
-                        await db.sessions.update_one(
-                            {"session_id": actual_session_id},
-                            {"$set": {
-                                "is_escalated": False,
-                                "assigned_counselor_id": None,
-                                "escalation_closed_at": datetime.now(timezone.utc),
-                                "updated_at": datetime.now(timezone.utc),
-                            }},
-                        )
-                    except Exception as e:
-                        logger.error(f"[WS] Failed to close escalation for session {actual_session_id}: {e}")
+                    logger.error(f"[WS] Failed to clear escalation for {actual_session_id}: {e}")
 
 
-async def _counselor_heartbeat(counselor_id: str) -> None:
-    """Updates last_ping every 20 seconds. Cancelled in the finally block on disconnect."""
+async def _counselor_heartbeat(counselor_id: str, token: str) -> None:
+    """
+    Updates last_ping every 20 seconds. 
+    Also performs periodic token validation to prevent expiry bypass.
+    """
     db = get_database()
     if db is None:
         return
     try:
+        from app.core.auth.JWTtoken import verify_token
+        credentials_exception = HTTPException(status_code=401, detail="Session expired")
+
         while True:
             await asyncio.sleep(20)
+            
+            # 1. Security Fix: Re-validate token periodically
             try:
-                await db.admins.update_one(
-                    {"_id": ObjectId(counselor_id)},
-                    {"$set": {"last_ping": datetime.now(timezone.utc)}},
-                )
-            except Exception as e:
-                # A single DB failure must not kill the heartbeat loop — log and continue
-                logger.warning(
-                    f"[HEARTBEAT] DB write failed for counselor {counselor_id}: {e} — retrying next tick"
-                )
+                await verify_token(token, credentials_exception)
+            except Exception:
+                logger.warning(f"[WS] Token expired for counselor {counselor_id}. Disconnecting.")
+                return
+
+            # 2. Update heartbeat + worker_id in DB
+            await db.admins.update_one(
+                {"_id": ObjectId(counselor_id)},
+                {"$set": {"last_ping": datetime.now(timezone.utc), "worker_id": WORKER_ID}}
+            )
     except asyncio.CancelledError:
         pass
     except Exception as e:

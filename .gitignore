@@ -27,3 +27,7 @@ requirements-test.txt
 tests/test_auth_and_sessions.py
 .pytest_cache/
 tests/test_crisis_escalation_routing.py
+tests/test_counselor_status.py
+app/api/routes/doctor.py
+app/services/assignment_service.py
+app/services/notification_service.py

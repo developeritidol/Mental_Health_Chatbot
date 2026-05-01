@@ -53,20 +53,17 @@ def _is_fresh(counselor_doc: dict) -> bool:
 
 def _is_available(counselor_doc: dict) -> bool:
     """
-    Returns True only when ALL four gates pass:
+    Returns True only when ALL three gates pass:
       1. is_online flag is True in DB
       2. Heartbeat is fresh (last_ping within _STALE_PING_SECONDS)
       3. Current sessions < max_concurrent_sessions
-      4. Counselor has an active connection (Dashboard or Chat)
     """
-    from app.core.connection_registry import is_counselor_connected
     counselor_id = str(counselor_doc.get("_id", ""))
     return (
         counselor_doc.get("is_online", False)
         and _is_fresh(counselor_doc)
         and counselor_doc.get("current_active_sessions", 0)
         < counselor_doc.get("max_concurrent_sessions", 3)
-        and is_counselor_connected(counselor_id)
     )
 
 
@@ -97,15 +94,13 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
             pass
 
     # Fetch a batch sorted by load; filter to those with active WebSockets
-    from app.core.connection_registry import is_counselor_connected
-    
     cursor = db.admins.find(query).sort("current_active_sessions", 1)
     candidates = await cursor.to_list(length=20)
 
     for candidate in candidates:
         active = candidate.get("current_active_sessions", 0)
         max_cap = candidate.get("max_concurrent_sessions", 3)
-        if active < max_cap and is_counselor_connected(str(candidate["_id"])):
+        if active < max_cap:
             return candidate
 
     return None
@@ -126,7 +121,6 @@ async def get_available_counselor_count() -> int:
     }
     
     # Fetch a batch and check for active WebSockets
-    from app.core.connection_registry import is_counselor_connected
     cursor = db.admins.find(query).limit(50)
     candidates = await cursor.to_list(length=50)
 
@@ -134,7 +128,7 @@ async def get_available_counselor_count() -> int:
     for candidate in candidates:
         active = candidate.get("current_active_sessions", 0)
         max_cap = candidate.get("max_concurrent_sessions", 3)
-        if active < max_cap and is_counselor_connected(str(candidate["_id"])):
+        if active < max_cap:
             count += 1
 
     return count

@@ -13,6 +13,7 @@ from app.api.schemas.response import (
     ChatMessageResponse,
     SessionListResponse,
     SessionResponse,
+    ManualEscalateResponse,
 )
 
 # Core
@@ -90,7 +91,7 @@ async def get_counselor_status(current_user = Depends(get_current_user)):
 
 # ── Manual Escalation ─────────────────────────────────────────────────────────
 
-@router.post("/manual-escalate")
+@router.post("/manual-escalate", response_model=ManualEscalateResponse, response_model_exclude_none=True)
 async def manual_escalate(
     current_user = Depends(get_current_user)
 ):
@@ -103,14 +104,14 @@ async def manual_escalate(
     # 1. Fetch the user's active session instead of requiring it from the body
     session_data = await get_existing_session(user_id)
     if not session_data:
-        raise HTTPException(status_code=400, detail="No active chat session found to escalate.")
+        return {"status": "failed", "message": "No active chat session found to escalate."}
         
     actual_session_id = session_data["session_id"]
 
     # 2. Mark the session as escalated (is_escalated = True)
     success = await escalate_session(actual_session_id)
     if not success:
-        raise HTTPException(status_code=500, detail="Failed to escalate session")
+        return {"status": "failed", "message": "Failed to escalate session"}
 
     # 3. Create a pseudo-consensus to feed into the routing engine
     consensus = {
@@ -139,10 +140,7 @@ async def manual_escalate(
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }))
 
-    # 6. Return strictly what the Android team requested
-    return {
-        "status": "success"
-    }
+    return {"status": "success"}
 
 
 # ── SSE Stream ─────────────────────────────────────────────────────────────────
@@ -157,6 +155,9 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
     Fix 19: escalation guard checks the specific session_id, not any session
             for the user, eliminating false blocks from older escalated sessions.
     """
+    if current_user.get("role") == "admin":
+        raise HTTPException(status_code=403, detail="Counselors cannot use the AI chat endpoint.")
+
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
@@ -180,7 +181,7 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
         )
     if current_session and current_session.get("is_escalated"):
         _settings = get_settings()
-        ws_url = f"ws://{_settings.SERVER_PUBLIC_HOST}:{_settings.SERVER_PORT}/api/human/chat/{user_id}"
+        ws_url = f"ws://{_settings.SERVER_PUBLIC_HOST}:{_settings.SERVER_PORT}/api/human/chat/{actual_session_id}"
 
         logger.info(f"[GUARD] Session {actual_session_id} for user {user_id} is escalated. Redirecting.")
 
@@ -266,8 +267,16 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
     if consensus.get("is_crisis") is True:
         logger.warning(f"[ESCALATION] Crisis detected for user {user_id} in session {actual_session_id}.")
 
-        await escalate_session(actual_session_id)
+        escalated_ok = await escalate_session(actual_session_id)
+        if not escalated_ok:
+            logger.error(
+                f"[ESCALATION] escalate_session() failed for session {actual_session_id} — "
+                "routing aborted; falling back to normal AI response."
+            )
+            # Clear the crisis flag so execution continues to the normal AI stream below
+            consensus["is_crisis"] = False
 
+    if consensus.get("is_crisis") is True:
         from app.services.routing_service import route_crisis_session
         asyncio.create_task(
             route_crisis_session(
@@ -287,7 +296,7 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
 
         # Return a single done-event — no AI chunks, no dual response
         _settings = get_settings()
-        _ws_url = f"ws://{_settings.SERVER_PUBLIC_HOST}:{_settings.SERVER_PORT}/api/human/chat/{user_id}"
+        _ws_url = f"ws://{_settings.SERVER_PUBLIC_HOST}:{_settings.SERVER_PORT}/api/human/chat/{actual_session_id}"
         crisis_payload = {
             "done": True,
             "timestamp": datetime.now(timezone.utc).isoformat(),

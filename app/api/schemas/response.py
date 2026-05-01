@@ -191,3 +191,13 @@ class LogoutResponse(BaseModel):
 class UserProfileResponse(BaseModel):
     status: str
     user: UserProfileData
+
+
+class CheckinCheckoutResponse(BaseModel):
+    status: str
+    message: str
+
+
+class ManualEscalateResponse(BaseModel):
+    status: str
+    message: Optional[str] = None

@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     SERVER_PORT: int = 8000
     SERVER_PUBLIC_HOST: str = "localhost"  # override in .env with actual IP or domain
 
+    # ── CORS ─────────────────────────────────────────────────────────────────
+    # Comma-separated list of allowed origins. Leave empty to allow all (dev only).
+    ALLOWED_ORIGINS: str = ""
+
     # ── JWT Authentication ────────────────────────────────────────────────────
     SECRET_KEY: str = Field(
         ...,

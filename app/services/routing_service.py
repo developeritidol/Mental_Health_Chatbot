@@ -53,24 +53,46 @@ def _is_fresh(counselor_doc: dict) -> bool:
 
 def _is_available(counselor_doc: dict) -> bool:
     """
-    Returns True only when ALL three gates pass:
+    Returns True only when ALL four gates pass:
       1. is_online flag is True in DB
       2. Heartbeat is fresh (last_ping within _STALE_PING_SECONDS)
-      3. Current sessions < max_concurrent_sessions
+      3. Active WebSocket connection exists on this process (connection_registry)
+      4. Current sessions < max_concurrent_sessions
     """
     counselor_id = str(counselor_doc.get("_id", ""))
     return (
         counselor_doc.get("is_online", False)
         and _is_fresh(counselor_doc)
+        and is_counselor_connected(counselor_id)
         and counselor_doc.get("current_active_sessions", 0)
         < counselor_doc.get("max_concurrent_sessions", 3)
     )
 
 
+_CATEGORY_GROUPS: list[frozenset] = [
+    frozenset({"suicidal_ideation", "self_harm", "suicide_attempt"}),
+    frozenset({"anxiety", "panic_attack", "ocd", "ptsd"}),
+    frozenset({"depression", "grief", "hopelessness"}),
+    frozenset({"substance_abuse", "addiction"}),
+    frozenset({"psychosis", "schizophrenia", "bipolar"}),
+    frozenset({"relationship_crisis", "domestic_abuse", "isolation"}),
+    frozenset({"eating_disorder", "body_image"}),
+]
+
+
 def _categories_match(current: str, previous: Optional[str]) -> bool:
+    """Returns True if previous counselor's category is compatible with the current crisis.
+    Uses a category hierarchy so related crises (e.g. suicidal_ideation + self_harm)
+    are treated as compatible rather than requiring exact string equality.
+    """
     if previous is None:
         return True
-    return current == previous
+    if current == previous:
+        return True
+    for group in _CATEGORY_GROUPS:
+        if current in group and previous in group:
+            return True
+    return False
 
 
 async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optional[dict]:
@@ -98,9 +120,7 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
     candidates = await cursor.to_list(length=20)
 
     for candidate in candidates:
-        active = candidate.get("current_active_sessions", 0)
-        max_cap = candidate.get("max_concurrent_sessions", 3)
-        if active < max_cap:
+        if _is_available(candidate):
             return candidate
 
     return None
@@ -246,7 +266,7 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
             # Push immediately to the user's open WebSocket room so they don't wait 20 minutes
             try:
                 from app.api.routes.human import manager as ws_manager
-                await ws_manager.send_to_all(user_id, {
+                await ws_manager.send_to_all(session_id, {
                     "role": "system",
                     "text": hotline_text,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -430,7 +450,7 @@ async def _notify_counselor(
         _settings = get_settings()
         ws_url = (
             f"ws://{_settings.SERVER_PUBLIC_HOST}:{_settings.SERVER_PORT}"
-            f"/api/human/chat/{user_id}"
+            f"/api/human/chat/{session_id}"
         )
 
         # 1 — Targeted: only the assigned counselor

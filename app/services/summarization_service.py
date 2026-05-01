@@ -164,3 +164,130 @@ def _fallback_summary(crisis_category: str) -> str:
         f"Automated summary unavailable. Crisis category: {crisis_category}. "
         "Please review the session history manually before engaging with the user."
     )
+
+
+# ── Post-session summaries (Summary-2 and Summary-3) ─────────────────────────
+
+async def generate_counselor_session_summary(session_id: str, crisis_category: str) -> str:
+    """
+    Summary-2: summarises only the human counselor ↔ user conversation that
+    occurred during the escalated session. Called after the session is closed.
+    """
+    db = get_database()
+    if db is None:
+        return "Counselor session summary unavailable — database error."
+
+    try:
+        cursor = db.messages.find(
+            {"session_id": session_id, "is_human_message": True},
+            sort=[("timestamp", 1)],
+        )
+        human_messages = await cursor.to_list(length=None)
+
+        if not human_messages:
+            return "No counselor-user exchange recorded for this session."
+
+        # Also include user replies during the counselor phase
+        all_cursor = db.messages.find(
+            {"session_id": session_id},
+            sort=[("timestamp", 1)],
+        )
+        all_messages = await all_cursor.to_list(length=None)
+
+        # Only keep messages from the counselor phase (after first human message)
+        first_human_ts = human_messages[0].get("timestamp")
+        counselor_phase = [
+            m for m in all_messages
+            if m.get("timestamp") and m["timestamp"] >= first_human_ts
+        ]
+
+        if not counselor_phase:
+            return "No counselor-user exchange recorded for this session."
+
+        transcript = _format_messages(counselor_phase)
+
+        settings = get_settings()
+        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a clinical documentation assistant. "
+                        "Write a concise post-session clinical note (under 300 words) "
+                        "summarising the counselor-patient conversation. "
+                        "Focus on: presenting issues, counselor interventions used, "
+                        "patient response, risk level at end of session, and recommended follow-up."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"CRISIS CATEGORY: {crisis_category}\n\n"
+                        f"COUNSELOR SESSION TRANSCRIPT:\n{transcript}\n\n"
+                        "Write the post-session clinical note now."
+                    ),
+                },
+            ],
+            max_tokens=500,
+            temperature=0.3,
+        )
+        summary = response.choices[0].message.content.strip()
+        logger.info(f"[SUMMARIZATION] Counselor session summary generated for session {session_id}")
+        return summary
+
+    except Exception as e:
+        logger.exception(f"[SUMMARIZATION] Counselor session summary failed for session {session_id}: {e}")
+        return "Counselor session summary unavailable — generation error."
+
+
+async def generate_merged_summary(
+    handoff_summary: str,
+    counselor_summary: str,
+    crisis_category: str,
+    session_id: str,
+) -> str:
+    """
+    Summary-3: merges the pre-session AI handoff note (Summary-1) with the
+    post-session counselor note (Summary-2) into a single longitudinal record.
+    """
+    if not handoff_summary and not counselor_summary:
+        return "No summary data available for this session."
+
+    try:
+        settings = get_settings()
+        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a clinical records assistant. "
+                        "Merge the two clinical notes below into one unified longitudinal record "
+                        "(under 500 words) that a future counselor can read to understand the "
+                        "full arc of this patient's crisis episode: what triggered it, how the "
+                        "counselor responded, and the outcome."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"CRISIS CATEGORY: {crisis_category}\n\n"
+                        f"PRE-SESSION HANDOFF NOTE (AI conversation summary):\n{handoff_summary}\n\n"
+                        f"POST-SESSION CLINICAL NOTE (counselor conversation summary):\n{counselor_summary}\n\n"
+                        "Write the merged longitudinal record now."
+                    ),
+                },
+            ],
+            max_tokens=800,
+            temperature=0.3,
+        )
+        merged = response.choices[0].message.content.strip()
+        logger.info(f"[SUMMARIZATION] Merged summary generated for session {session_id}")
+        return merged
+
+    except Exception as e:
+        logger.exception(f"[SUMMARIZATION] Merged summary failed for session {session_id}: {e}")
+        return f"{handoff_summary}\n\n---\n\n{counselor_summary}"

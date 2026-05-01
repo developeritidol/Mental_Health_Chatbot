@@ -257,3 +257,9 @@ class StreamChatRequest(BaseModel):
     """
     session_id: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1, max_length=2000)
+
+
+# ── Human Intervention ────────────────────────────────────────────────────────
+
+class CheckinCheckoutRequest(BaseModel):
+    is_online: bool

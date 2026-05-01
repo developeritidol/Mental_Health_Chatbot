@@ -778,12 +778,16 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
 
         if db is not None:
             try:
+                update_query = {
+                    "$set": {"is_online": True, "last_ping": datetime.now(timezone.utc)}
+                }
+                # Fix: Don't mark busy if doctor is just joining their own waiting room
+                if user_id != authenticated_user_id:
+                    update_query["$inc"] = {"current_active_sessions": 1}
+                    
                 await db.admins.update_one(
                     {"_id": ObjectId(authenticated_user_id)},
-                    {
-                        "$set": {"is_online": True, "last_ping": datetime.now(timezone.utc)},
-                        "$inc": {"current_active_sessions": 1},
-                    },
+                    update_query,
                 )
             except Exception as e:
                 logger.warning(f"[WS] Could not update presence for counselor {authenticated_user_id}: {e}")
@@ -933,11 +937,12 @@ async def human_chat_ws(websocket: WebSocket, user_id: str):
 
             if db is not None:
                 try:
-                    # Only decrement the session counter — is_online is owned by the dashboard WebSocket
-                    await db.admins.update_one(
-                        {"_id": ObjectId(authenticated_user_id), "current_active_sessions": {"$gt": 0}},
-                        {"$inc": {"current_active_sessions": -1}},
-                    )
+                    # Fix: Don't decrement if they were just sitting in their own waiting room
+                    if user_id != authenticated_user_id:
+                        await db.admins.update_one(
+                            {"_id": ObjectId(authenticated_user_id), "current_active_sessions": {"$gt": 0}},
+                            {"$inc": {"current_active_sessions": -1}},
+                        )
                 except Exception as e:
                     logger.error(f"[WS] Failed to clean up presence for counselor {authenticated_user_id}: {e}")
 

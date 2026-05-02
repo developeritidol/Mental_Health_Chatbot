@@ -106,7 +106,8 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
     user_name = "Friend"
     if user_doc:
         user_name = (
-            user_doc.get("name")
+            user_doc.get("first_name")
+            or user_doc.get("name")
             or user_doc.get("full_name")
             or current_user.get("name")
             or "Friend"

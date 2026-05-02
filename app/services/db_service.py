@@ -158,9 +158,18 @@ async def get_user_profile(user_id: str) -> Optional[dict]:
 
         doc = await db.users.find_one({"$or": query})
 
+        # FC4: prefer first_name, fall back to full_name (legacy docs), then "Friend"
+        name = "Friend"
+        if doc:
+            name = (
+                doc.get("first_name")
+                or doc.get("full_name")
+                or doc.get("name")
+                or "Friend"
+            )
         return {
             "user_id": user_id,
-            "name": doc.get("full_name", "Friend") if doc else "Friend",
+            "name": name,
             "personality_summary": doc.get("personality_summary", "Not provided") if doc else "Not provided",
             "country": "IN"
         }
@@ -194,6 +203,49 @@ async def get_existing_session(user_id: str) -> Optional[dict]:
         return None
     except Exception as e:
         logger.error(f"Failed to lookup session for user {user_id}: {e}")
+        return None
+
+
+async def get_session_history(session_id: str, limit: int = 20) -> list:
+    """Returns the last N messages for a session in chronological order."""
+    db = get_database()
+    if db is None:
+        return []
+    try:
+        cursor = db.messages.find(
+            {"session_id": session_id},
+            sort=[("timestamp", -1)],
+            limit=limit,
+        )
+        messages = await cursor.to_list(length=limit)
+        return list(reversed(messages))
+    except Exception as e:
+        logger.error(f"get_session_history failed for session {session_id}: {e}")
+        return []
+
+
+async def upsert_session(user_id: str, session_id: str) -> Optional[dict]:
+    """Creates a session document if it does not exist, then returns it."""
+    db = get_database()
+    if db is None:
+        return None
+    try:
+        await db.sessions.update_one(
+            {"session_id": session_id},
+            {"$setOnInsert": {
+                "session_id": session_id,
+                "user_id": user_id,
+                "is_active": True,
+                "is_escalated": False,
+                "lethality_alert": False,
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }},
+            upsert=True,
+        )
+        return await db.sessions.find_one({"session_id": session_id})
+    except Exception as e:
+        logger.error(f"upsert_session failed for session {session_id}: {e}")
         return None
 
 
@@ -282,6 +334,7 @@ async def close_escalation(session_id: str) -> bool:
             {"session_id": session_id},
             {"$set": {
                 "is_escalated": False,
+                "assigned_counselor_id": None,
                 "escalation_closed_at": datetime.now(timezone.utc),
                 "updated_at": datetime.now(timezone.utc),
             }},
@@ -305,6 +358,7 @@ async def close_escalation_by_user(user_id: str) -> bool:
             {"user_id": user_id, "is_escalated": True},
             {"$set": {
                 "is_escalated": False,
+                "assigned_counselor_id": None,
                 "escalation_closed_at": datetime.now(timezone.utc),
                 "updated_at": datetime.now(timezone.utc),
             }},

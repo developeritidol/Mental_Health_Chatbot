@@ -21,7 +21,9 @@ from functools import lru_cache
 from app.core.logger import get_logger
 
 from dotenv import load_dotenv
-load_dotenv()
+# override=True ensures .env values always win over stale OS/shell environment
+# variables, preventing short expiry values set elsewhere from shadowing .env.
+load_dotenv(override=True)
 
 logger = get_logger(__name__)
 
@@ -61,9 +63,17 @@ class Settings(BaseSettings):
     # This value is a safety fallback ONLY — never used for normal chat flow.
     MAX_TOKENS: int = 300
 
-    # ── Server address (used to build WebSocket URLs) ─────────────────────────
-    SERVER_HOST: str = "localhost"
+    # ── Server address ────────────────────────────────────────────────────────
+    # SERVER_HOST is the binding address for uvicorn (0.0.0.0 = all interfaces).
+    # SERVER_PUBLIC_HOST is the address clients use to connect (real IP or domain).
+    # These MUST be different when running on a remote server.
+    SERVER_HOST: str = "0.0.0.0"
     SERVER_PORT: int = 8000
+    SERVER_PUBLIC_HOST: str = "localhost"  # override in .env with actual IP or domain
+
+    # ── CORS ─────────────────────────────────────────────────────────────────
+    # Comma-separated list of allowed origins. Leave empty to allow all (dev only).
+    ALLOWED_ORIGINS: str = ""
 
     # ── JWT Authentication ────────────────────────────────────────────────────
     SECRET_KEY: str = Field(
@@ -76,7 +86,7 @@ class Settings(BaseSettings):
         #     description="Must be set via SECRET_KEY environment variable"
         # )    
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 10080  # 7 days
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     class Config:
@@ -86,8 +96,13 @@ class Settings(BaseSettings):
 
 @lru_cache()
 def get_settings() -> Settings:
-    logger.debug("Loading application settings")
     settings = Settings()
     if not settings.SECRET_KEY:
         raise RuntimeError("SECRET_KEY must be set")
+    logger.info(
+        f"Settings loaded — "
+        f"ACCESS_TOKEN_EXPIRE_MINUTES={settings.ACCESS_TOKEN_EXPIRE_MINUTES} "
+        f"({settings.ACCESS_TOKEN_EXPIRE_MINUTES / 1440:.1f} days), "
+        f"REFRESH_TOKEN_EXPIRE_DAYS={settings.REFRESH_TOKEN_EXPIRE_DAYS}"
+    )
     return settings

@@ -1,8 +1,17 @@
-from pydantic import BaseModel, Field, EmailStr, validator
+from pydantic import BaseModel, Field, EmailStr, model_validator
 from typing import Optional
 from enum import Enum
 
-# 1. ENUMS (Define these first so they are ready for the classes below)
+
+# ── Enums ─────────────────────────────────────────────────────────────────────
+
+class GenderEnum(str, Enum):
+    MALE = "male"
+    FEMALE = "female"
+    NON_BINARY = "non_binary"
+    PREFER_NOT_TO_SAY = "prefer_not_to_say"
+
+
 class ProfessionalRole(str, Enum):
     PSYCHOLOGIST = "Licensed Psychologist (PhD / PsyD)"
     PSYCHIATRIST = "Psychiatrist (MD / DO)"
@@ -13,18 +22,22 @@ class ProfessionalRole(str, Enum):
     OTHER = "Other (with specification)"
     NONE = "none"
 
+
 class PracticeType(str, Enum):
     PRIVATE = "Private"
     CLINIC = "Clinic"
     TELEHEALTH = "Telehealth"
     NONE = "none"
 
+
 class ConsultationMode(str, Enum):
     IN_PERSON = "In-person"
     TELEHEALTH = "Telehealth"
     NONE = "none"
 
-# 2. SCHEMAS
+
+# ── Assessment ────────────────────────────────────────────────────────────────
+
 class ProfileInput(BaseModel):
     first_name: str = Field(..., min_length=1, max_length=40)
     last_name: Optional[str] = Field(default=None, max_length=40)
@@ -34,6 +47,7 @@ class ProfileInput(BaseModel):
     emergency_contact_relation: Optional[str] = None
     emergency_contact_phone: Optional[str] = None
 
+
 class PersonalityAnswers(BaseModel):
     prefers_solitude: str = "Sometimes"
     logic_over_emotion: str = "Sometimes"
@@ -41,55 +55,148 @@ class PersonalityAnswers(BaseModel):
     energized_by_social: str = "Sometimes"
     trusts_instincts: str = "Sometimes"
 
+
+# ── Nested Registration (Mobile Compat) ───────────────────────────────────────
+
+class RoleDefinition(BaseModel):
+    is_user: bool
+
+class RoleSection(BaseModel):
+    definition: RoleDefinition
+
+class CommonFields(BaseModel):
+    first_name: str
+    last_name: str
+    email: str
+    password: str
+    gender: Optional[str] = None
+    age: Optional[int] = None
+    phone_number: str
+
+class EmergencyContacts(BaseModel):
+    emergency_contact_name: Optional[str] = None
+    # Note: Issues Report used "emergency_contact_number" instead of "emergency_contact_phone"
+    emergency_contact_number: Optional[str] = None
+    emergency_contact_relation: Optional[str] = None
+
+class AdminRegistration(BaseModel):
+    city: Optional[str] = None
+    state: Optional[str] = None
+    npi_number: Optional[str] = None
+    professional_role: Optional[str] = None
+    license_number: Optional[str] = None
+    state_of_licensure: Optional[str] = None
+    practice_type: Optional[str] = None
+    consultation_mode: Optional[str] = None
+
+class NestedRegisterPayload(BaseModel):
+    role: RoleSection
+    common_fields: CommonFields
+    emergency_contacts: EmergencyContacts
+    admin_registration: AdminRegistration
+
+
 class AssessmentRequest(BaseModel):
     """POST /api/assessment — one-time onboarding from Android."""
     personality_answers: PersonalityAnswers
 
+
+# ── Registration ──────────────────────────────────────────────────────────────
+
 class UserCreateRequest(BaseModel):
-    full_name: str = Field(..., min_length=3, max_length=100, pattern=r"^[a-zA-Z ]+$")
+    """
+    FC3: is_admin removed — role determined solely by is_user.
+    FC4: full_name replaced by first_name + last_name.
+    FC5: gender and age added as required fields.
+    FC6: model_validator enforces role-specific required fields.
+    """
+    first_name: str = Field(..., min_length=1, max_length=50)
+    last_name: str = Field(..., min_length=1, max_length=50)
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=128)
     phone_number: str = Field(..., pattern=r"^\+?[1-9]\d{1,14}$")
-    is_user: bool = Field(..., description="Required boolean field")
-    is_admin: bool = Field(..., description="Required boolean field")
-    professional_role: Optional[str] = "str"
-    license_number: Optional[str] = "str"
-    state_of_licensure: Optional[str] = "str"
-    npi_number: Optional[str] = "str"
-    practice_type: Optional[str] = "str"
-    city: Optional[str] = "str"
-    state: Optional[str] = "str"
-    consultation_mode: Optional[str] = "str"
+    # True = patient (users collection), False = counselor/admin (admins collection)
+    is_user: bool = Field(..., description="True for patient, False for counselor/admin")
+    gender: GenderEnum
+    age: int = Field(..., ge=13, le=120)
 
-    @validator('is_user')
-    def validate_user_role(cls, v, values):
-        # If both roles are false, default is_user to true
-        if 'is_admin' in values and not values['is_admin'] and not v:
-            return True
-        # Prevent both roles from being true (business logic)
-        if 'is_admin' in values and values['is_admin'] and v:
-            raise ValueError('User cannot be both admin and regular user simultaneously')
-        return v
+    # Patient-specific fields
+    emergency_contact_name: Optional[str] = None
+    emergency_contact_relation: Optional[str] = None
+    emergency_contact_phone: Optional[str] = None
 
-    class Config:
-        schema_extra = {
-            "example": {
-                "full_name": "John Doe",
-                "email": "abc@gmail.com",
-                "password": "Abcd@1234",
-                "phone_number": "+911234567890",
-                "is_user": True,
-                "is_admin": False,
-                "professional_role": None,
-                "license_number": None,
-                "state_of_licensure": None,
-                "npi_number": None,
-                "practice_type": None,
-                "city": None,
-                "state": None,
-                "consultation_mode": None
-            }
+    # Counselor-specific fields
+    professional_role: Optional[str] = None
+    license_number: Optional[str] = None
+    state_of_licensure: Optional[str] = None
+    npi_number: Optional[str] = None
+    practice_type: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    consultation_mode: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_role_fields(self) -> "UserCreateRequest":
+        """FC6: enforce role-specific required fields at schema boundary."""
+        if self.is_user:
+            # Patient: emergency contact is required for crisis escalation
+            missing = []
+            if not self.emergency_contact_name:
+                missing.append("emergency_contact_name")
+            if not self.emergency_contact_relation:
+                missing.append("emergency_contact_relation")
+            if not self.emergency_contact_phone:
+                missing.append("emergency_contact_phone")
+            if missing:
+                raise ValueError(
+                    f"Patient registration requires: {', '.join(missing)}"
+                )
+        else:
+            # Counselor: professional credentials are required for compliance
+            required_counselor = [
+                "professional_role", "license_number", "state_of_licensure",
+                "npi_number", "practice_type", "city", "state", "consultation_mode",
+            ]
+            missing = [f for f in required_counselor if not getattr(self, f)]
+            if missing:
+                raise ValueError(
+                    f"Counselor registration requires: {', '.join(missing)}"
+                )
+        return self
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                
+                    {
+                        "first_name": "Dr. Sarah",
+                        "last_name": "Smith",
+                        "email": "sarah@clinic.com",
+                        "password": "Abcd@1234",
+                        "phone_number": "+911234567891",
+                        "is_user": False,
+                        "gender": "female",
+                        "age": 42,
+                        "professional_role": "Licensed Psychologist (PhD / PsyD)",
+                        "license_number": "PSY12345",
+                        "state_of_licensure": "California",
+                        "npi_number": "1234567890",
+                        "practice_type": "Private",
+                        "city": "Los Angeles",
+                        "state": "CA",
+                        "consultation_mode": "In-person",
+                        "emergency_contact_name": "John Doe",
+                        "emergency_contact_relation": "Spouse",
+                        "emergency_contact_phone": "+919876543210"
+                    
+                }
+            ]
         }
+    }
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
 class UserLoginRequest(BaseModel):
     email: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
@@ -97,28 +204,22 @@ class UserLoginRequest(BaseModel):
     model_config = {
         "json_schema_extra": {
             "example": {
-                "email": "john@example.com",
+                "email": "jane@example.com",
                 "password": "Abcd@1234"
             }
         }
     }
+
 
 class ForgotPasswordRequest(BaseModel):
     email: str = Field(..., pattern=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
     model_config = {
         "json_schema_extra": {
-            "example": {
-                "email": "abcd@gmail.com"
-            }
+            "example": {"email": "jane@example.com"}
         }
     }
 
-class StreamChatRequest(BaseModel):
-    """POST /api/chat/stream — every chat message from Android."""
-    user_id: str = Field(..., min_length=1)
-    session_id: str = Field(..., min_length=1)
-    message: str = Field(..., min_length=1, max_length=2000)
 
 class VerifyOtpRequest(BaseModel):
     email: str = Field(..., description="User email address")
@@ -126,12 +227,10 @@ class VerifyOtpRequest(BaseModel):
 
     model_config = {
         "json_schema_extra": {
-            "example": {
-                "email": "abcd@gmail.com",
-                "otp": "123456"
-            }
+            "example": {"email": "jane@example.com", "otp": "123456"}
         }
     }
+
 
 class ResetPasswordRequest(BaseModel):
     email: str = Field(..., description="User email address")
@@ -139,13 +238,28 @@ class ResetPasswordRequest(BaseModel):
 
     model_config = {
         "json_schema_extra": {
-            "example": {
-                "email": "abcd@gmail.com",
-                "new_password": "Abcd@1234"
-            }
+            "example": {"email": "jane@example.com", "new_password": "NewPass@1234"}
         }
     }
 
+
 class RefreshTokenRequest(BaseModel):
-    """POST /api/users/refresh - Exchange a refresh token for a new access token."""
-    refresh_token: str = Field(..., min_length=1, description="A valid refresh token")
+    """POST /api/users/refresh — exchange a refresh token for a new access token."""
+    refresh_token: str = Field(..., min_length=1)
+
+
+# ── Chat ──────────────────────────────────────────────────────────────────────
+
+class StreamChatRequest(BaseModel):
+    """
+    POST /api/chat/stream — every chat message from Android.
+    FC7: user_id removed — identity is extracted exclusively from the JWT token.
+    """
+    session_id: str = Field(..., min_length=1)
+    message: str = Field(..., min_length=1, max_length=2000)
+
+
+# ── Human Intervention ────────────────────────────────────────────────────────
+
+class CheckinCheckoutRequest(BaseModel):
+    is_online: bool

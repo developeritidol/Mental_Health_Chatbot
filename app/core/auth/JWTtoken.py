@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt, ExpiredSignatureError
 from fastapi import HTTPException
 
@@ -18,7 +18,7 @@ def create_access_token(data: dict):
     settings = get_settings()
 
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(
+    expire = datetime.now(timezone.utc) + timedelta(
         minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
     )
 
@@ -40,7 +40,7 @@ def create_refresh_token(data: dict):
     settings = get_settings()
 
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(
+    expire = datetime.now(timezone.utc) + timedelta(
         days=settings.REFRESH_TOKEN_EXPIRE_DAYS
     )
 
@@ -62,11 +62,10 @@ def create_refresh_token(data: dict):
 # Verify Refresh Token
 # ─────────────────────────────────────────────────────────────
 
-def verify_refresh_token(token: str, credentials_exception):
+async def verify_refresh_token(token: str, credentials_exception):
     settings = get_settings()
 
-    # Blacklist check
-    if is_token_blacklisted(token):
+    if await is_token_blacklisted(token):
         logger.warning("event=refresh_token_rejected reason=blacklisted")
         raise HTTPException(status_code=401, detail="Token is blacklisted")
 
@@ -77,7 +76,7 @@ def verify_refresh_token(token: str, credentials_exception):
             algorithms=[settings.ALGORITHM]
         )
 
-        useremail = payload.get("sub")
+        email = payload.get("sub")
         user_id = payload.get("user_id")
         token_type = payload.get("type")
         role = payload.get("role")
@@ -88,7 +87,7 @@ def verify_refresh_token(token: str, credentials_exception):
 
         token_data = TokenData(
             user_id=user_id,
-            email=useremail,
+            email=email,
             role=role
         )
 
@@ -110,19 +109,17 @@ def verify_refresh_token(token: str, credentials_exception):
 # Verify Access Token
 # ─────────────────────────────────────────────────────────────
 
-def verify_token(token: str, credentials_exception):
+async def verify_token(token: str, credentials_exception):
     settings = get_settings()
 
     try:
-        # Atomic: Decode token first to validate format
         payload = jwt.decode(
             token,
             settings.SECRET_KEY,
             algorithms=[settings.ALGORITHM]
         )
 
-        # Atomic: Check blacklist immediately after successful decode
-        if is_token_blacklisted(token):
+        if await is_token_blacklisted(token):
             logger.warning("event=access_token_rejected reason=blacklisted")
             raise HTTPException(
                 status_code=401,

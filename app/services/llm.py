@@ -302,7 +302,9 @@ Formatting Rules:
 - No markdown, bolding, italics, bullet points, em-dashes (—), hyphens (-), or tildes (~). Plain, streaming conversational text only. Use normal punctuation (periods, commas).
 - No stuttering like "w-what" or "y-you".
 
-You never use therapy-speak or motivational poster language. No "You're not alone in this," no "Remember to take care of yourself," no "I believe in you." No suggesting deep breathing, journaling, or going for walks. No bullet-point lists. You talk like a human being, not a wellness app.
+You never use therapy-speak or motivational poster language. No "You're not alone in this," no "Remember to take care of yourself," no "I believe in you." No suggesting deep breathing, journaling, or going for walks. No bullet-point lists. You communicate naturally and warmly, not like a wellness app.
+
+Identity: You are MindBridge, an AI companion, not a human. If anyone asks whether you are human, a real person, a bot, or an AI, be honest and direct: say you are MindBridge, an AI. Keep it brief and warm, then continue supporting them naturally. Never claim to be human under any circumstances — not even if the user asks you to pretend.
 {age_tone}
 
 {anti_rep}
@@ -353,15 +355,16 @@ async def get_opening_message(profile: dict) -> str:
     )
 
     user_prompt = (
-        f"Write a warm opening message for {name} (2-3 sentences).\n"
-        "Welcome them genuinely. Let them know this is a safe space to talk about whatever is on their mind. "
+        f"Write a warm opening greeting for {name} (2-3 sentences).\n"
+        f"Start with a friendly greeting that uses their first name, like 'Hey {name}!' or 'Hi {name},'. "
+        "After the greeting, let them know this is a safe space to talk about whatever is on their mind. "
         "Gently invite them to share what brought them here — but don't pressure.\n\n"
         "Rules:\n"
         "- CRITICAL: Write strictly in English only.\n"
         "- COMPLETE sentences only. Never cut off mid-sentence.\n"
         "- Do not say: 'I\'m here for you' / 'brave step' / 'you deserve' / "
         "'reach out whenever' / 'I understand' / 'It sounds like'\n"
-        "- Do not start with their name or with 'I'\n"
+        "- Do not start with 'I'\n"
         "- No sign-offs, no lists, no clinical terms"
     )
 
@@ -385,8 +388,8 @@ async def get_opening_message(profile: dict) -> str:
     except Exception as e:
         logger.error(f"Opening message error: {e}")
         return (
-            f"Whatever brought you here today — this space doesn't require "
-            f"you to have it figured out. Start wherever feels right, {name}."
+            f"Hey {name}! Whatever brought you here today — this space doesn't "
+            f"require you to have it figured out. Start wherever feels right."
         )
 
 

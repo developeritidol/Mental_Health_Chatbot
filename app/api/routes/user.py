@@ -11,10 +11,11 @@ POST /api/users/logout
 """
 
 import re
+import uuid
 from typing import Literal
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.concurrency import run_in_threadpool
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from app.core.auth.oauth2 import get_current_user
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from passlib.context import CryptContext
@@ -54,7 +55,7 @@ from app.core.auth.JWTtoken import (
 )
 from app.core.auth.token_blacklist import add_to_blacklist
 from app.services.email_service import generate_otp, validate_email, send_otp_email
-from app.services.db_service import get_existing_session
+from app.services.db_service import get_existing_session, upsert_session
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 logger = get_logger(__name__)
@@ -243,8 +244,8 @@ async def user_register(payload: UserCreateRequest):
             "gender": payload.gender.value if payload.gender else None,
             "age": payload.age,
             "is_active": True,
-            "created_at": datetime.utcnow(),
-            "last_active": datetime.utcnow(),
+            "created_at": datetime.now(timezone.utc),
+            "last_active": datetime.now(timezone.utc),
         }
 
         if payload.is_user:
@@ -349,7 +350,7 @@ async def user_login(payload: UserLoginRequest):
         collection = _resolve_collection(db, user_doc)
         await collection.update_one(
             {"_id": user_doc["_id"]},
-            {"$set": {"last_login": datetime.utcnow()}}
+            {"$set": {"last_login": datetime.now(timezone.utc)}}
         )
 
         user_id_str = str(user_doc["_id"])
@@ -362,13 +363,19 @@ async def user_login(payload: UserLoginRequest):
 
         user_data = _build_profile_data(user_doc, user_id_str)
 
-        # Check assessment completion via session existence.
-        # A session is created by the assessment endpoint, so its presence means
-        # the user completed onboarding. Admins skip assessment entirely.
+        # Resolve session_id — patients always get one, even on first login.
+        # assessment_completed is true only when personality_summary is saved
+        # (set exclusively by the assessment endpoint after onboarding).
         if not is_admin:
             existing_session = await get_existing_session(user_id_str)
-            assessment_completed = existing_session is not None
-            session_id_val = existing_session.get("session_id") if existing_session else None
+            if existing_session:
+                session_id_val = existing_session.get("session_id")
+            else:
+                # First login — no session yet. Create one so the client
+                # always has a valid session_id to work with.
+                session_id_val = str(uuid.uuid4())
+                await upsert_session(user_id_str, session_id_val)
+            assessment_completed = bool(user_doc.get("personality_summary"))
         else:
             assessment_completed = True
             session_id_val = None
@@ -411,7 +418,7 @@ async def forgot_password(payload: ForgotPasswordRequest):
             )
 
         otp = generate_otp()
-        expires_at = datetime.utcnow() + timedelta(minutes=15)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
 
         if "_id" not in user_doc:
             raise HTTPException(status_code=500, detail="User data corrupted")
@@ -463,7 +470,8 @@ async def verify_otp(payload: VerifyOtpRequest):
 
         if not stored_otp or not expires_at:
             raise HTTPException(status_code=400, detail="No reset request found. Please request a new OTP.")
-        if datetime.utcnow() > expires_at:
+        expires_at_aware = expires_at.replace(tzinfo=timezone.utc) if expires_at.tzinfo is None else expires_at
+        if datetime.now(timezone.utc) > expires_at_aware:
             raise HTTPException(status_code=400, detail="OTP has expired. Please request a new OTP.")
         if payload.otp != stored_otp:
             raise HTTPException(status_code=400, detail="Invalid OTP. Please check and try again.")
@@ -513,7 +521,7 @@ async def reset_password(payload: ResetPasswordRequest):
         collection = _resolve_collection(db, user_doc)
         await collection.update_one(
             {"_id": user_doc["_id"]},
-            {"$set": {"password_hash": password_hash, "last_active": datetime.utcnow()}}
+            {"$set": {"password_hash": password_hash, "last_active": datetime.now(timezone.utc)}}
         )
 
         logger.info(f"Password reset for {masked_email}")

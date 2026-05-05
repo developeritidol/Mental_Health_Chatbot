@@ -203,3 +203,8 @@ class CheckinCheckoutResponse(BaseModel):
 class ManualEscalateResponse(BaseModel):
     status: str
     message: Optional[str] = None
+
+
+class CounselorStatusResponse(BaseModel):
+    status: str
+    is_checked: bool

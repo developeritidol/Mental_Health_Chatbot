@@ -40,6 +40,7 @@ from app.api.schemas.response import (
     ChatHistoryResponse,
     ChatMessageResponse,
     CheckinCheckoutResponse,
+    CounselorStatusResponse,
 )
 from app.api.schemas.request import CheckinCheckoutRequest
 from app.core.logger import get_logger
@@ -252,6 +253,29 @@ async def checkin_checkout(
         mark_counselor_disconnected(doctor_id)
         logger.info(f"[CHECKOUT] Counselor {doctor_id} checked OUT via REST.")
         return {"status": "success", "message": "Check-out successful"}
+
+
+@router.get("/checkin-status", response_model=CounselorStatusResponse)
+async def get_checkin_status(
+    current_user=Depends(get_current_user),
+):
+    """
+    Returns the current check-in status of the counselor.
+    """
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only counselors can view check-in status.")
+
+    doctor_id = str(current_user.get("user_id") or current_user.get("_id"))
+    db = get_database()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    counselor_doc = await db.admins.find_one({"_id": ObjectId(doctor_id)})
+    if not counselor_doc:
+        raise HTTPException(status_code=404, detail="Counselor not found.")
+
+    is_online = counselor_doc.get("is_online", False)
+    return {"status": "success", "is_checked": is_online}
 
 
 # ── Connection Manager ────────────────────────────────────────────────────────

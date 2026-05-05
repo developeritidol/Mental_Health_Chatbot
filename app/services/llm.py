@@ -96,6 +96,7 @@ def _build_personalization_note(
     if turn_count <= 2:
         return (
             f"You've just started talking with {name}. "
+            f"Please address them by their name naturally in your response to make them feel welcome. "
             "You don't know much yet — be curious, not assumptive."
         )
 

@@ -71,12 +71,12 @@ class CommonFields(BaseModel):
     password: str
     gender: Optional[str] = None
     age: Optional[int] = None
-    phone_number: str
+    phone_number: str = Field(..., pattern=r"^\+[1-9]\d{3,14}$")
 
 class EmergencyContacts(BaseModel):
     emergency_contact_name: Optional[str] = None
     # Note: Issues Report used "emergency_contact_number" instead of "emergency_contact_phone"
-    emergency_contact_number: Optional[str] = None
+    emergency_contact_number: Optional[str] = Field(default=None, pattern=r"^\+[1-9]\d{3,14}$")
     emergency_contact_relation: Optional[str] = None
 
 class AdminRegistration(BaseModel):
@@ -114,7 +114,7 @@ class UserCreateRequest(BaseModel):
     last_name: str = Field(..., min_length=1, max_length=50)
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=128)
-    phone_number: str = Field(..., pattern=r"^\+?[1-9]\d{1,14}$")
+    phone_number: str = Field(..., pattern=r"^\+[1-9]\d{3,14}$")
     # True = patient (users collection), False = counselor/admin (admins collection)
     is_user: bool = Field(..., description="True for patient, False for counselor/admin")
     gender: GenderEnum
@@ -123,7 +123,7 @@ class UserCreateRequest(BaseModel):
     # Patient-specific fields
     emergency_contact_name: Optional[str] = None
     emergency_contact_relation: Optional[str] = None
-    emergency_contact_phone: Optional[str] = None
+    emergency_contact_phone: Optional[str] = Field(default=None, pattern=r"^\+[1-9]\d{3,14}$")
 
     # Counselor-specific fields
     professional_role: Optional[str] = None
@@ -234,7 +234,12 @@ class VerifyOtpRequest(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     email: str = Field(..., description="User email address")
-    new_password: str = Field(..., min_length=8, max_length=128)
+    new_password: str = Field(
+        ...,
+        pattern=r"^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,128}$",
+        min_length=8,
+        max_length=128
+    )
 
     model_config = {
         "json_schema_extra": {

@@ -8,6 +8,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from typing import Optional
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,7 @@ def _send_email_sync(recipient: str, subject: str, body: str) -> bool:
 
 async def send_otp_email(recipient: str, otp: str) -> bool:
     """Send OTP email for password reset."""
+    settings = get_settings()
     html_body = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="background-color: #f5f5f5; padding: 20px; border-radius: 8px;">
@@ -116,7 +118,7 @@ async def send_otp_email(recipient: str, otp: str) -> bool:
             
             <p style="color: #666; font-size: 16px; line-height: 1.6;">
                 You requested to reset your password for your MindBridge account. 
-                Please use the OTP below to proceed. This OTP is valid for 30 minutes.
+                Please use the OTP below to proceed. This OTP is valid for {settings.OTP_EXPIRY_MINUTES} minutes.
             </p>
             
             <div style="background-color: #0c2340; padding: 20px; border-radius: 8px; text-align: center; margin: 30px 0;">

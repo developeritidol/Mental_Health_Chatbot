@@ -46,6 +46,7 @@ from app.models.db import UserModelDB, AdminModelDB
 from bson import ObjectId
 from app.core.database import get_database
 from app.core.logger import get_logger
+from app.core.config import get_settings
 from app.core.auth.hashing import Hash
 from app.core.auth.password_policy import validate_password
 from app.core.auth.JWTtoken import (
@@ -213,10 +214,6 @@ async def user_register(payload: UserCreateRequest):
         email = payload.email.strip().lower()
         phone_number = payload.phone_number.strip()
         
-        # Validate phone number has at least 4 digits
-        if len(re.sub(r'\D', '', phone_number)) < 4:
-            raise HTTPException(status_code=400, detail="Phone number must contain at least 4 digits")
-            
         first_name = payload.first_name.strip()
         last_name = payload.last_name.strip()
         full_name = f"{first_name} {last_name}".strip()
@@ -418,7 +415,8 @@ async def forgot_password(payload: ForgotPasswordRequest):
             )
 
         otp = generate_otp()
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+        settings = get_settings()
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.OTP_EXPIRY_MINUTES)
 
         if "_id" not in user_doc:
             raise HTTPException(status_code=500, detail="User data corrupted")
@@ -511,6 +509,10 @@ async def reset_password(payload: ResetPasswordRequest):
 
         if user_doc.get("password_reset_token") or user_doc.get("password_reset_expires"):
             raise HTTPException(status_code=400, detail="Please verify your OTP first before resetting password.")
+
+        if "password_hash" in user_doc:
+            if await run_in_threadpool(Hash.verify, user_doc["password_hash"], payload.new_password):
+                raise HTTPException(status_code=400, detail="New password must not match the current password.")
 
         validate_password(payload.new_password)
         password_hash = await run_in_threadpool(Hash.bcrypt, payload.new_password)

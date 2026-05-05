@@ -59,9 +59,19 @@ COUNSELOR_TIMEOUT_SECONDS = 1200  # 20 minutes
 async def list_escalated_sessions(user_id: Optional[str] = None, current_provider = Depends(get_current_user)):
     if current_provider.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Only counselors can access this resource.")
+        
     db = get_database()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    # Validate that the counselor is checked in before showing the escalation list
+    doctor_id = str(current_provider.get("user_id") or current_provider.get("_id"))
+    counselor_doc = await db.admins.find_one({"_id": ObjectId(doctor_id)})
+    if not counselor_doc or not counselor_doc.get("is_online", False):
+        raise HTTPException(
+            status_code=403, 
+            detail="You must be checked in (online) to view the escalation list."
+        )
 
     query = {"is_escalated": True}
     if user_id:

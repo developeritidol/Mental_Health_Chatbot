@@ -236,9 +236,11 @@ class ResetPasswordRequest(BaseModel):
     email: str = Field(..., description="User email address")
     new_password: str = Field(
         ...,
-        pattern=r"^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,128}$",
         min_length=8,
-        max_length=128
+        max_length=128,
+        json_schema_extra={
+            "pattern": r"^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,128}$"
+        }
     )
 
     model_config = {

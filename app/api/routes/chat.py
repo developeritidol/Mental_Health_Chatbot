@@ -43,6 +43,21 @@ from app.api.routes.human import manager
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
+# Phrases that signal the user wants to keep talking to the AI, not a human.
+# Checked against the lowercased message BEFORE the counselor-redirect branch
+# so a mis-fire from the small Llama model cannot trigger an unwanted handoff.
+_AI_PREFERENCE_PHRASES = (
+    "talk to you only", "talk to you alone", "only want to talk to you",
+    "just want to talk to you", "i want to talk to you", "talk with you only",
+    "don't want a human", "dont want a human", "not a human", "no human",
+    "don't need a counselor", "dont need a counselor", "don't want a counselor",
+    "dont want a counselor", "don't need a therapist", "dont need a therapist",
+    "just listen", "just be there", "just talk to me", "talk for a bit",
+    "check in on me", "be there with me", "be there for me",
+    "i just need someone to listen", "need someone to listen",
+    "don't need you to fix", "dont need you to fix",
+)
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -265,13 +280,18 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
         consensus = _safe_fallback_consensus()
 
     # ── Counselor request detection — user explicitly asked for a human ───────
+    _msg_lower = req.message.lower()
+    if consensus.get("wants_counselor") is True and any(p in _msg_lower for p in _AI_PREFERENCE_PHRASES):
+        logger.info(f"[COUNSELOR_REQUEST] Suppressed — user message indicates AI preference: '{req.message[:80]}'")
+        consensus["wants_counselor"] = False
+
     if consensus.get("wants_counselor") is True and not consensus.get("is_crisis"):
         logger.info(f"[COUNSELOR_REQUEST] User {user_id} requested a human counselor.")
         counselor_info_payload = {
             "done": True,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": "counselor_request",
-            "message": "There is a button available in the top right corner to directly connect with a human counselor.",
+            "message": "Of course — you can connect with a human counselor anytime using the button in the top right corner.",
         }
 
         async def _counselor_request_stream():

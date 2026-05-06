@@ -484,7 +484,11 @@ async def get_formatted_history(session_id: str, limit: int = 100) -> List[Dict[
         docs = await cursor.to_list(length=limit)
         docs.reverse()  # chronological order for LLM
 
-        return [{"role": doc["role"], "content": doc["content"]} for doc in docs]
+        return [
+            {"role": doc.get("role", "user"), "content": doc.get("content", "")}
+            for doc in docs
+            if doc.get("content")
+        ]
     except Exception as e:
         logger.error(f"Failed to fetch history for session {session_id}: {e}")
         return []
@@ -511,7 +515,7 @@ async def get_session_messages(session_id: str) -> List[Dict]:
                     "session_id": doc.get("session_id", "unknown"),
                     "role": doc.get("role", "unknown"),
                     "content": doc.get("content", ""),
-                    "timestamp": doc.get("timestamp").replace(tzinfo=timezone.utc) if doc.get("timestamp") else None,
+                    "timestamp": _ensure_utc(doc.get("timestamp")),
                 })
 
         logger.info(f"Fetched {len(formatted)} messages for session {session_id}")
@@ -521,10 +525,20 @@ async def get_session_messages(session_id: str) -> List[Dict]:
         return []
 
 
-async def get_user_messages(user_id: str) -> List[Dict]:
+def _ensure_utc(ts) -> Optional[datetime]:
+    """Return a timezone-aware UTC datetime regardless of whether ts is naive or aware."""
+    if ts is None:
+        return None
+    if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
+        return ts.astimezone(timezone.utc)
+    return ts.replace(tzinfo=timezone.utc)
+
+
+async def get_user_messages(user_id: str, limit: int = 300) -> List[Dict]:
     """
-    Retrieves ALL messages for a given user_id.
-    Returns them sorted chronologically (oldest to newest) to rebuild the UI.
+    Retrieves the most recent `limit` messages for a given user_id.
+    Capped to prevent unbounded queries that cause gateway timeouts (502).
+    Sorted chronologically oldest→newest for the UI to render correctly.
     """
     db = get_database()
     if db is None:
@@ -532,17 +546,22 @@ async def get_user_messages(user_id: str) -> List[Dict]:
         return []
 
     try:
-        cursor = db.messages.find({"user_id": user_id}).sort("timestamp", 1)
-        docs = await cursor.to_list(length=None)
+        # Fetch newest `limit` messages first (descending), then reverse for chronological order.
+        # This avoids a full collection scan on large message sets.
+        cursor = db.messages.find({"user_id": user_id}).sort("timestamp", -1).limit(limit)
+        docs = await cursor.to_list(length=limit)
+        docs.reverse()
 
         formatted = []
         for doc in docs:
+            if doc.get("role") == "system" or doc.get("sender_type") == "system":
+                continue
             if doc.get("content"):
                 formatted.append({
                     "user_id": doc.get("user_id", "unknown"),
                     "role": doc.get("role", "unknown"),
                     "content": doc.get("content", ""),
-                    "timestamp": doc.get("timestamp").replace(tzinfo=timezone.utc) if doc.get("timestamp") else None,
+                    "timestamp": _ensure_utc(doc.get("timestamp")),
                 })
 
         logger.info(f"Fetched {len(formatted)} messages for user {user_id}")

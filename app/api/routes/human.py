@@ -33,6 +33,7 @@ from app.services.db_service import (
     close_escalation,
     close_escalation_by_user,
     get_existing_session,
+    _ensure_utc,
 )
 from app.api.schemas.response import (
     EscalatedSessionListResponse,
@@ -180,14 +181,16 @@ async def get_escalated_session_messages(user_id: str, current_provider = Depend
         for doc in docs:
             # Skip internal system/routing messages (e.g. "no counselors available"
             # hotline notices) — these are operational events, not conversation turns.
-            if doc.get("role") == "system":
+            # Check both role and sender_type to catch messages inserted by older code
+            # that may have stored sender_type="system" with a null/missing role field.
+            if doc.get("role") == "system" or doc.get("sender_type") == "system":
                 continue
             if doc.get("content"):
                 messages.append({
                     "session_id": doc.get("session_id", "unknown"),
                     "role": doc.get("role", "unknown"),
                     "content": doc.get("content", ""),
-                    "timestamp": doc.get("timestamp").replace(tzinfo=timezone.utc) if doc.get("timestamp") else None,
+                    "timestamp": _ensure_utc(doc.get("timestamp")),
                     "user_id": user_id,
                 })
 

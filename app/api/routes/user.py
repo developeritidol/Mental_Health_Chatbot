@@ -57,6 +57,7 @@ from app.core.auth.JWTtoken import (
 from app.core.auth.token_blacklist import add_to_blacklist
 from app.services.email_service import generate_otp, validate_email, send_otp_email
 from app.services.db_service import get_existing_session, upsert_session
+from app.services import llm as llm_svc
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 logger = get_logger(__name__)
@@ -145,6 +146,43 @@ def _build_profile_data(user_doc: dict, user_id: str) -> UserProfileData:
     )
 
 
+async def _generate_login_greeting(first_name: str, personality_summary: str) -> str:
+    """
+    Generates a short, warm, personalised welcome-back greeting for a returning
+    user at login time.  Uses the LLM so the tone matches the user's personality.
+    Falls back to a plain string if the LLM call fails.
+    """
+    profile = {
+        "name": first_name,
+        "personality_summary": personality_summary,
+    }
+    prompt = (
+        f"Write a single short sentence (max 15 words) welcoming {first_name} back "
+        "to MindBridge. Use their name. Sound warm and genuine, not generic. "
+        "No sign-off, no questions, no emojis. Plain text only."
+    )
+    try:
+        from openai import AsyncOpenAI
+        from app.core.config import get_settings as _gs
+        _settings = _gs()
+        client = AsyncOpenAI(api_key=_settings.OPENAI_API_KEY)
+        resp = await client.chat.completions.create(
+            model=_settings.MAIN_MODEL,
+            messages=[
+                {"role": "system", "content": f"You are MindBridge, a warm mental health companion. Personality context for {first_name}: {personality_summary}"},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=40,
+            temperature=0.7,
+        )
+        text = resp.choices[0].message.content.strip().strip('"')
+        if text:
+            return text
+    except Exception as e:
+        logger.warning(f"Login greeting LLM call failed: {e}")
+    return f"Welcome back, {first_name}! Good to have you here again."
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/register/mobile", response_model=UserSignupResponse)
@@ -165,13 +203,7 @@ async def mobile_register(payload: NestedRegisterPayload):
         "phone_number": payload.common_fields.phone_number,
     }
     
-    if flat_data["is_user"]:
-        flat_data.update({
-            "emergency_contact_name": payload.emergency_contacts.emergency_contact_name,
-            "emergency_contact_relation": payload.emergency_contacts.emergency_contact_relation,
-            "emergency_contact_phone": payload.emergency_contacts.emergency_contact_number, # mapping from mobile spec
-        })
-    else:
+    if not flat_data["is_user"]:
         flat_data.update({
             "city": payload.admin_registration.city,
             "state": payload.admin_registration.state,
@@ -246,12 +278,6 @@ async def user_register(payload: UserCreateRequest):
         }
 
         if payload.is_user:
-            # Patient — store emergency contact
-            doc["emergency_contact"] = {
-                "name": payload.emergency_contact_name,
-                "relation": payload.emergency_contact_relation,
-                "phone": payload.emergency_contact_phone,
-            }
             result = await db.users.insert_one(doc)
             role_log = "user"
         else:
@@ -363,6 +389,7 @@ async def user_login(payload: UserLoginRequest):
         # Resolve session_id — patients always get one, even on first login.
         # assessment_completed is true only when personality_summary is saved
         # (set exclusively by the assessment endpoint after onboarding).
+        welcome_message = None
         if not is_admin:
             existing_session = await get_existing_session(user_id_str)
             if existing_session:
@@ -373,6 +400,19 @@ async def user_login(payload: UserLoginRequest):
                 session_id_val = str(uuid.uuid4())
                 await upsert_session(user_id_str, session_id_val)
             assessment_completed = bool(user_doc.get("personality_summary"))
+
+            # Generate a personalised welcome-back greeting for returning users
+            # who have already completed the assessment.
+            if assessment_completed:
+                first_name = (
+                    user_doc.get("first_name")
+                    or user_doc.get("full_name", "").split()[0]
+                    or "there"
+                ).strip()
+                welcome_message = await _generate_login_greeting(
+                    first_name,
+                    user_doc.get("personality_summary", ""),
+                )
         else:
             assessment_completed = True
             session_id_val = None
@@ -387,6 +427,7 @@ async def user_login(payload: UserLoginRequest):
             refresh_token=refresh_token,
             assessment_completed=assessment_completed,
             session_id=session_id_val,
+            welcome_message=welcome_message,
         )
 
     except HTTPException:
@@ -567,9 +608,15 @@ async def refresh_token(payload: RefreshTokenRequest):
         user_id_str = str(user_doc["_id"])
 
         access_token = create_access_token(data={"sub": token_subject, "role": user_role, "user_id": user_id_str})
+        new_refresh_token = create_refresh_token(data={"sub": token_subject, "role": user_role, "user_id": user_id_str})
 
         logger.info(f"Access token refreshed for: {token_data.email}")
-        return RefreshTokenResponse(status="success", access_token=access_token, token_type="bearer")
+        return RefreshTokenResponse(
+            status="success", 
+            access_token=access_token, 
+            refresh_token=new_refresh_token,
+            token_type="bearer"
+        )
 
     except HTTPException:
         raise

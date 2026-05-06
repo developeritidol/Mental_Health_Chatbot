@@ -3,8 +3,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
 
 from app.services.emotion import warmup
 from app.core.database import connect_to_mongo, close_mongo_connection, get_database
@@ -74,6 +75,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(RequestValidationError)
+async def custom_validation_exception_handler(request, exc):
+    """
+    Intercepts Pydantic's default 422 Unprocessable Entity and returns
+    a mobile-friendly 400 Bad Request with structured error details.
+    """
+    errors = []
+    for error in exc.errors():
+        field = " -> ".join(str(loc) for loc in error.get("loc", []))
+        errors.append({
+            "field": field,
+            "message": error.get("msg", "Invalid value"),
+            "type": error.get("type", "value_error"),
+        })
+
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error_code": "VALIDATION_ERROR",
+            "message": "One or more fields failed validation. Please check your input.",
+            "details": errors,
+        },
+    )
 
 # ── API Routers ───────────────────────────────────────────────────────────────
 app.include_router(chat.router)

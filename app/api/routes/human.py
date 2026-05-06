@@ -41,6 +41,7 @@ from app.api.schemas.response import (
     ChatMessageResponse,
     CheckinCheckoutResponse,
     CounselorStatusResponse,
+    WebSocketStatusResponse,
 )
 from app.api.schemas.request import CheckinCheckoutRequest
 from app.core.logger import get_logger
@@ -80,28 +81,64 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
     cursor = db.sessions.find(query).sort("escalated_at", -1)
     docs = await cursor.to_list(length=None)
 
-    # Collect unique user IDs and batch-fetch their names
+    # Collect unique user IDs and batch-fetch their names.
+    # Convert each uid to ObjectId individually so one bad/legacy id cannot
+    # crash the entire list comprehension and wipe out all names (InvalidId
+    # on any single entry would silently leave user_names empty).
     user_ids = list({doc.get("user_id") for doc in docs if doc.get("user_id")})
     user_names: dict[str, tuple[str, Optional[str]]] = {}
     if user_ids:
-        try:
-            user_cursor = db.users.find(
-                {"_id": {"$in": [ObjectId(uid) for uid in user_ids]}},
-                {"_id": 1, "first_name": 1, "last_name": 1, "full_name": 1},
-            )
-            user_docs = await user_cursor.to_list(length=None)
-            for u in user_docs:
-                uid_str = str(u["_id"])
-                fn = u.get("first_name") or (u.get("full_name") or "Unknown").split()[0]
-                ln = u.get("last_name")
-                user_names[uid_str] = (fn, ln)
-        except Exception:
-            pass
+        valid_user_oids = []
+        for uid in user_ids:
+            try:
+                valid_user_oids.append(ObjectId(uid))
+            except Exception:
+                pass
+        if valid_user_oids:
+            try:
+                user_cursor = db.users.find(
+                    {"_id": {"$in": valid_user_oids}},
+                    {"_id": 1, "first_name": 1, "last_name": 1, "full_name": 1},
+                )
+                user_docs = await user_cursor.to_list(length=None)
+                for u in user_docs:
+                    uid_str = str(u["_id"])
+                    fn = u.get("first_name") or (u.get("full_name") or "Unknown").split()[0]
+                    ln = u.get("last_name")
+                    user_names[uid_str] = (fn, ln)
+            except Exception:
+                pass
+
+    # Collect unique assigned counselor IDs and batch-fetch their names
+    # using the same safe per-item ObjectId conversion.
+    counselor_ids = list({doc.get("assigned_counselor_id") for doc in docs if doc.get("assigned_counselor_id")})
+    counselor_names: dict[str, tuple[str, Optional[str]]] = {}
+    if counselor_ids:
+        valid_counselor_oids = []
+        for cid in counselor_ids:
+            try:
+                valid_counselor_oids.append(ObjectId(cid))
+            except Exception:
+                pass
+        if valid_counselor_oids:
+            try:
+                c_cursor = db.admins.find(
+                    {"_id": {"$in": valid_counselor_oids}},
+                    {"_id": 1, "first_name": 1, "last_name": 1},
+                )
+                c_docs = await c_cursor.to_list(length=None)
+                for c in c_docs:
+                    cid_str = str(c["_id"])
+                    counselor_names[cid_str] = (c.get("first_name", "Counselor"), c.get("last_name"))
+            except Exception:
+                pass
 
     sessions = []
     for doc in docs:
         uid = doc.get("user_id", "")
         fn, ln = user_names.get(uid, ("Unknown", None))
+        cid = doc.get("assigned_counselor_id")
+        cfn, cln = counselor_names.get(cid, (None, None)) if cid else (None, None)
         sessions.append({
             "session_id": doc.get("session_id"),
             "user_id": uid,
@@ -113,6 +150,9 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
             "created_at": doc.get("created_at"),
             "updated_at": doc.get("updated_at"),
             "escalated_at": doc.get("escalated_at"),
+            "assigned_counselor_id": cid,
+            "counselor_first_name": cfn,
+            "counselor_last_name": cln,
         })
 
     formatted = [EscalatedSessionResponse(**s) for s in sessions]
@@ -138,6 +178,10 @@ async def get_escalated_session_messages(user_id: str, current_provider = Depend
         docs = await cursor.to_list(length=None)
         messages = []
         for doc in docs:
+            # Skip internal system/routing messages (e.g. "no counselors available"
+            # hotline notices) — these are operational events, not conversation turns.
+            if doc.get("role") == "system":
+                continue
             if doc.get("content"):
                 messages.append({
                     "session_id": doc.get("session_id", "unknown"),
@@ -288,17 +332,36 @@ async def get_checkin_status(
     return {"status": "success", "is_checked": is_online}
 
 
+@router.get("/ws-status/{session_id}", response_model=WebSocketStatusResponse)
+async def get_ws_status(session_id: str, current_user=Depends(get_current_user)):
+    """
+    Returns the live WebSocket connection state for a given session.
+
+    - is_socket_connected   — at least one WebSocket is open in this session room
+    - is_user_connected     — the patient has an active WebSocket connection
+    - is_counselor_connected — a human counselor has joined the session room
+    """
+    return WebSocketStatusResponse(
+        status="success",
+        session_id=session_id,
+        is_socket_connected=bool(manager.rooms.get(session_id)),
+        is_user_connected=manager.user_has_joined(session_id),
+        is_counselor_connected=manager.human_has_joined(session_id),
+    )
+
+
 # ── Connection Manager ────────────────────────────────────────────────────────
 
 class ConnectionManager:
     def __init__(self):
         self.rooms: dict[str, list[WebSocket]] = {}
         self.has_human: dict[str, bool] = {}
+        self.has_user: dict[str, bool] = {}
         self.dashboard_clients: set[WebSocket] = set()
         # counselor_id → list of their active dashboard WebSocket(s)
         self.counselor_ws: dict[str, list[WebSocket]] = {}
         self.timeout_tasks: dict[str, asyncio.Task] = {}
-        # user_id → set of counselor_ids already counted in current_active_sessions
+        # session_id → set of counselor_ids already counted in current_active_sessions
         # Prevents double-counting when a counselor opens multiple tabs for the same patient
         self.room_counselors: dict[str, set[str]] = {}
 
@@ -340,12 +403,19 @@ class ConnectionManager:
     def human_has_joined(self, user_id: str) -> bool:
         return self.has_human.get(user_id, False)
 
+    def mark_user_joined(self, session_id: str):
+        self.has_user[session_id] = True
+
+    def user_has_joined(self, session_id: str) -> bool:
+        return self.has_user.get(session_id, False)
+
     def disconnect(self, user_id: str, ws: WebSocket):
         if user_id in self.rooms:
             self.rooms[user_id] = [c for c in self.rooms[user_id] if c is not ws]
             if not self.rooms[user_id]:
                 del self.rooms[user_id]
                 counselor_joined = self.has_human.pop(user_id, False)
+                self.has_user.pop(user_id, None)
                 self.room_counselors.pop(user_id, None)
                 # Only cancel the watchdog if a counselor already joined.
                 # If no counselor ever joined, let the timeout fire so re-routing
@@ -382,6 +452,7 @@ class ConnectionManager:
         # Clean up room state directly without triggering timeout cancellation
         self.rooms.pop(user_id, None)
         self.has_human.pop(user_id, None)
+        self.has_user.pop(user_id, None)
         self.room_counselors.pop(user_id, None)
 
     async def connect_dashboard(self, ws: WebSocket, counselor_id: Optional[str] = None):
@@ -851,6 +922,7 @@ async def human_chat_ws(websocket: WebSocket, session_id: str):
             f" | counselor_id={authenticated_user_id} | name={counselor_name}"
         )
     else:
+        manager.mark_user_joined(session_id)
         logger.info(
             f"[WS CHAT] ✓ CONNECTED | role=user | session={session_id} | user_id={authenticated_user_id}"
         )

@@ -8,8 +8,18 @@ from enum import Enum
 class GenderEnum(str, Enum):
     MALE = "male"
     FEMALE = "female"
-    NON_BINARY = "non_binary"
-    PREFER_NOT_TO_SAY = "prefer_not_to_say"
+    NON_BINARY = "non-binary"
+    PREFER_NOT_TO_SAY = "prefer-not-to-say"
+
+    @classmethod
+    def _missing_(cls, value):
+        # Accept underscore variants sent by older clients (e.g. "non_binary")
+        if isinstance(value, str):
+            normalised = value.replace("_", "-").lower()
+            for member in cls:
+                if member.value == normalised:
+                    return member
+        return None
 
 
 class ProfessionalRole(str, Enum):
@@ -43,9 +53,6 @@ class ProfileInput(BaseModel):
     last_name: Optional[str] = Field(default=None, max_length=40)
     gender: Optional[str] = None
     age: Optional[int] = Field(default=None, ge=1, le=120)
-    emergency_contact_name: Optional[str] = None
-    emergency_contact_relation: Optional[str] = None
-    emergency_contact_phone: Optional[str] = None
 
 
 class PersonalityAnswers(BaseModel):
@@ -73,12 +80,6 @@ class CommonFields(BaseModel):
     age: Optional[int] = None
     phone_number: str = Field(..., pattern=r"^\+[1-9]\d{3,14}$")
 
-class EmergencyContacts(BaseModel):
-    emergency_contact_name: Optional[str] = None
-    # Note: Issues Report used "emergency_contact_number" instead of "emergency_contact_phone"
-    emergency_contact_number: Optional[str] = Field(default=None, pattern=r"^\+[1-9]\d{3,14}$")
-    emergency_contact_relation: Optional[str] = None
-
 class AdminRegistration(BaseModel):
     city: Optional[str] = None
     state: Optional[str] = None
@@ -92,7 +93,6 @@ class AdminRegistration(BaseModel):
 class NestedRegisterPayload(BaseModel):
     role: RoleSection
     common_fields: CommonFields
-    emergency_contacts: EmergencyContacts
     admin_registration: AdminRegistration
 
 
@@ -118,12 +118,7 @@ class UserCreateRequest(BaseModel):
     # True = patient (users collection), False = counselor/admin (admins collection)
     is_user: bool = Field(..., description="True for patient, False for counselor/admin")
     gender: GenderEnum
-    age: int = Field(..., ge=13, le=120)
-
-    # Patient-specific fields
-    emergency_contact_name: Optional[str] = None
-    emergency_contact_relation: Optional[str] = None
-    emergency_contact_phone: Optional[str] = Field(default=None, pattern=r"^\+[1-9]\d{3,14}$")
+    age: int = Field(..., ge=13, le=150)
 
     # Counselor-specific fields
     professional_role: Optional[str] = None
@@ -138,20 +133,7 @@ class UserCreateRequest(BaseModel):
     @model_validator(mode="after")
     def validate_role_fields(self) -> "UserCreateRequest":
         """FC6: enforce role-specific required fields at schema boundary."""
-        if self.is_user:
-            # Patient: emergency contact is required for crisis escalation
-            missing = []
-            if not self.emergency_contact_name:
-                missing.append("emergency_contact_name")
-            if not self.emergency_contact_relation:
-                missing.append("emergency_contact_relation")
-            if not self.emergency_contact_phone:
-                missing.append("emergency_contact_phone")
-            if missing:
-                raise ValueError(
-                    f"Patient registration requires: {', '.join(missing)}"
-                )
-        else:
+        if not self.is_user:
             # Counselor: professional credentials are required for compliance
             required_counselor = [
                 "professional_role", "license_number", "state_of_licensure",
@@ -184,10 +166,7 @@ class UserCreateRequest(BaseModel):
                         "practice_type": "Private",
                         "city": "Los Angeles",
                         "state": "CA",
-                        "consultation_mode": "In-person",
-                        "emergency_contact_name": "John Doe",
-                        "emergency_contact_relation": "Spouse",
-                        "emergency_contact_phone": "+919876543210"
+                        "consultation_mode": "In-person"
                     
                 }
             ]

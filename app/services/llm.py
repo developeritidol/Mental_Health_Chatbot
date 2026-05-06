@@ -91,7 +91,14 @@ def _build_personalization_note(
         parts = []
         if age > 0:
             parts.append(f"age {age}")
-        return (f"{name}, " + ", ".join(parts) + ".") if parts else ""
+        base = (f"{name}, " + ", ".join(parts) + ".") if parts else ""
+        # Always ask the LLM to greet by name on the very first turn,
+        # regardless of whether age is known.
+        greeting_note = (
+            f"This is your very first reply to {name}. "
+            f"Start your response by greeting them warmly using their name."
+        )
+        return f"{base} {greeting_note}".strip()
 
     if turn_count <= 2:
         return (
@@ -105,12 +112,18 @@ def _build_personalization_note(
         if m.get("role") == "user" and m.get("content", "").strip()
     ]
 
+    # Every 3 turns, remind the LLM to use the name naturally once.
+    name_reminder = (
+        f" Use {name}'s name naturally once in this response."
+        if turn_count % 3 == 0 else ""
+    )
+
     if turn_count <= 5:
         shared = (" | ".join(user_msgs[-3:]))[:250] if user_msgs else ""
         return (
             f"You know {name} somewhat now. "
             f"They've shared: {shared}. "
-            "Reference what they told you. Be specific, not generic."
+            f"Reference what they told you. Be specific, not generic.{name_reminder}"
         )
 
     # Turn 6+: deep personalization
@@ -118,7 +131,7 @@ def _build_personalization_note(
     return (
         f"You know {name} well by now. "
         f"Here's what they've shared over the conversation: {all_shared}. "
-        "Use this to be specific and personal. Reference things they told you earlier."
+        f"Use this to be specific and personal. Reference things they told you earlier.{name_reminder}"
     )
 
 # ── System prompt builder ─────────────────────────────────────────────────────

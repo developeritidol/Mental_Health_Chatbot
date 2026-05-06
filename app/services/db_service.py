@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import List, Dict, Optional
 from datetime import datetime, timezone
@@ -171,7 +172,9 @@ async def get_user_profile(user_id: str) -> Optional[dict]:
             "user_id": user_id,
             "name": name,
             "personality_summary": doc.get("personality_summary", "Not provided") if doc else "Not provided",
-            "country": "IN"
+            "age": doc.get("age") if doc else None,
+            "gender": doc.get("gender") if doc else None,
+            "country": "IN",
         }
     except Exception as e:
         logger.error(f"Failed to get profile for {user_id}: {e}")
@@ -411,8 +414,11 @@ async def is_user_escalated(user_id: str) -> bool:
 async def save_message(message_data: dict) -> bool:
     """
     Saves a single message (user or assistant) to MongoDB.
-    For user messages, also generates and stores an embedding vector
-    for long-term memory retrieval (RAG).
+
+    The message is inserted immediately so it is visible in history without
+    delay.  Embedding generation (OpenAI network call) then runs as a
+    fire-and-forget background task so a slow or failing embedding call
+    cannot block the insert or leave messages invisible to the history API.
     """
     db = get_database()
     if db is None:
@@ -420,7 +426,7 @@ async def save_message(message_data: dict) -> bool:
 
     doc = {
         "session_id": message_data.get("session_id"),
-        "user_id": message_data.get("user_id"),  # Completely replacing user_id reliance
+        "user_id": message_data.get("user_id"),
         "turn_number": message_data.get("turn_number", 0),
         "role": message_data.get("role"),
         "content": message_data.get("content"),
@@ -431,23 +437,35 @@ async def save_message(message_data: dict) -> bool:
         doc["roberta_analysis"] = message_data["roberta_analysis"]
     if "llm_consensus" in message_data:
         doc["llm_consensus"] = message_data["llm_consensus"]
-
-    # Generate and store embedding for ALL messages (user + AI) for full RAG retrieval
-    if message_data.get("content"):
-        embedding = await generate_embedding(message_data["content"])
-        if embedding:
-            doc["embedding"] = embedding
+    if "is_human_message" in message_data:
+        doc["is_human_message"] = message_data["is_human_message"]
 
     try:
-        await db.messages.insert_one(doc)
+        result = await db.messages.insert_one(doc)
         await db.sessions.update_one(
             {"session_id": message_data.get("session_id")},
             {"$set": {"updated_at": datetime.now(timezone.utc)}},
         )
-        return True
     except Exception as e:
         logger.error(f"Failed to save message: {e}")
         return False
+
+    # Generate embedding in the background — does not block message visibility
+    async def _attach_embedding(doc_id, content: str):
+        try:
+            embedding = await generate_embedding(content)
+            if embedding:
+                await db.messages.update_one(
+                    {"_id": doc_id},
+                    {"$set": {"embedding": embedding}},
+                )
+        except Exception as emb_err:
+            logger.warning(f"Embedding generation failed for message {doc_id}: {emb_err}")
+
+    if message_data.get("content"):
+        asyncio.create_task(_attach_embedding(result.inserted_id, message_data["content"]))
+
+    return True
 
 
 async def get_formatted_history(session_id: str, limit: int = 100) -> List[Dict[str, str]]:

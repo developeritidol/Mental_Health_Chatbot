@@ -46,6 +46,16 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed")
 
+    # Fetch user doc first to check if this is their first assessment
+    or_query = [{"user_id": user_id}]
+    try:
+        or_query.append({"_id": ObjectId(user_id)})
+    except InvalidId:
+        pass
+
+    user_doc = await db.users.find_one({"$or": or_query})
+    is_first_assessment = not bool(user_doc.get("personality_summary")) if user_doc else True
+
     # 1. Save/update personality only
     personality_dict = req.personality_answers.model_dump()
     personality_summary = build_personality_summary(personality_dict)
@@ -56,53 +66,34 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
         "last_active": datetime.now(timezone.utc),
     }
 
-    # Fix #7: Fully implement ObjectId fallback so the update works regardless of
-    # whether the user doc was created with user_id or just with _id (ObjectId).
-    or_query = [{"user_id": user_id}]
-    try:
-        or_query.append({"_id": ObjectId(user_id)})
-    except InvalidId:
-        pass  # user_id is not a valid ObjectId — that's fine, only match by user_id
-
-    update_doc.pop("user_id", None)
-    update_doc.pop("_id", None)
-
     await db.users.update_one(
         {"$or": or_query},
         {"$set": update_doc}
     )
 
-    # 2. Check if this user already has a session
+    # 2. Get existing session or create a new one
     existing = await db.sessions.find_one({"user_id": user_id}, sort=[("created_at", -1)])
     if existing:
         session_id = existing.get("session_id")
         logger.info(f"Reusing existing session {session_id} for user {user_id}")
-        return AssessmentResponse(
-            status="success",
-            session_id=session_id,
-            opening_message="Welcome back! How are you feeling today?",
-            timestamp=datetime.now(timezone.utc),
-            user_id=user_id,
-        )
+    else:
+        session_id = str(uuid.uuid4())
+        try:
+            await db.sessions.insert_one({
+                "session_id": session_id,
+                "user_id": user_id,
+                "is_active": True,
+                "lethality_alert": False,
+                "is_escalated": False,
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            })
+            logger.info(f"Assessment complete. New session: {session_id}")
+        except Exception as e:
+            logger.error(f"Failed to create session: {e}")
+            raise HTTPException(status_code=500, detail="Failed to create session")
 
-    # 3. No session exists — create a new one
-    session_id = str(uuid.uuid4())
-    try:
-        await db.sessions.insert_one({
-            "session_id": session_id,
-            "user_id": user_id,
-            "is_active": True,
-            "lethality_alert": False,
-            "is_escalated": False,
-            "created_at": datetime.now(timezone.utc),
-            "updated_at": datetime.now(timezone.utc),
-        })
-    except Exception as e:
-        logger.error(f"Failed to create session: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create session")
-
-    # Fix #10: Fetch real user name from DB; fall back to "Friend" only if missing
-    user_doc = await db.users.find_one({"$or": or_query})
+    # Fetch real user name from DB; fall back to "Friend" only if missing
     user_name = "Friend"
     if user_doc:
         user_name = (
@@ -115,16 +106,22 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
         # Use first name only for a warmer greeting
         user_name = user_name.strip().split()[0] if user_name.strip() else "Friend"
 
-    # 4. Generate opening message
-    llm_profile = {
-        "name": user_name,
-        "personality_summary": personality_summary,
-        "country": "IN",
-    }
+    if is_first_assessment:
+        # 4. Generate opening message with full profile context
+        llm_profile = {
+            "name": user_name,
+            "personality_summary": personality_summary,
+            "age": user_doc.get("age") if user_doc else None,
+            "gender": user_doc.get("gender") if user_doc else None,
+            "country": "IN",
+        }
 
-    opening = await llm_svc.get_opening_message(llm_profile)
+        opening = await llm_svc.get_opening_message(llm_profile)
+    else:
+        # Returning user — personalized welcome back using their name
+        opening = f"Welcome back, {user_name}! How are you feeling today?"
 
-    # 5. Save opening message to DB so it's in the history
+    # Save opening message to DB so it appears in history for both new and returning users
     await save_message({
         "session_id": session_id,
         "user_id": user_id,
@@ -132,8 +129,6 @@ async def submit_assessment(req: AssessmentRequest, current_user = Depends(get_c
         "role": "assistant",
         "content": opening,
     })
-
-    logger.info(f"Assessment complete. New session: {session_id}")
 
     return AssessmentResponse(
         status="success",

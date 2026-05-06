@@ -258,6 +258,7 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
             )
             await db.messages.insert_one({
                 "session_id": session_id,
+                "user_id": user_id,
                 "role": "system",
                 "sender_type": "system",
                 "content": hotline_text,

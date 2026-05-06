@@ -72,6 +72,9 @@ class EscalatedSessionResponse(BaseModel):
     escalated_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    assigned_counselor_id: Optional[str] = None
+    counselor_first_name: Optional[str] = None
+    counselor_last_name: Optional[str] = None
 
 
 class EscalatedSessionListResponse(BaseModel):
@@ -162,6 +165,7 @@ class UserLoginResponse(BaseModel):
     token_type: str = "bearer"
     assessment_completed: bool = False
     session_id: Optional[str] = None
+    welcome_message: Optional[str] = None
 
 
 class ForgotPasswordResponse(BaseModel):
@@ -182,6 +186,7 @@ class ResetPasswordResponse(BaseModel):
 class RefreshTokenResponse(BaseModel):
     status: str
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
 
 
@@ -208,3 +213,11 @@ class ManualEscalateResponse(BaseModel):
 class CounselorStatusResponse(BaseModel):
     status: str
     is_checked: bool
+
+
+class WebSocketStatusResponse(BaseModel):
+    status: str
+    session_id: str
+    is_socket_connected: bool
+    is_user_connected: bool
+    is_counselor_connected: bool

@@ -344,12 +344,14 @@ async def get_ws_status(session_id: str, current_user=Depends(get_current_user))
     - is_user_connected     — the patient has an active WebSocket connection
     - is_counselor_connected — a human counselor has joined the session room
     """
+    is_user = manager.is_role_in_room(session_id, "user")
+    is_counselor = manager.is_role_in_room(session_id, "human_counselor")
     return WebSocketStatusResponse(
         status="success",
         session_id=session_id,
-        is_socket_connected=bool(manager.rooms.get(session_id)),
-        is_user_connected=manager.user_has_joined(session_id),
-        is_counselor_connected=manager.human_has_joined(session_id),
+        is_user_connected=is_user,
+        is_counselor_connected=is_counselor,
+        is_socket_connected=is_user and is_counselor,
     )
 
 
@@ -360,6 +362,7 @@ class ConnectionManager:
         self.rooms: dict[str, list[WebSocket]] = {}
         self.has_human: dict[str, bool] = {}
         self.has_user: dict[str, bool] = {}
+        self.ws_roles: dict[int, str] = {}  # id(ws) → "user" | "human_counselor"
         self.dashboard_clients: set[WebSocket] = set()
         # counselor_id → list of their active dashboard WebSocket(s)
         self.counselor_ws: dict[str, list[WebSocket]] = {}
@@ -400,8 +403,25 @@ class ConnectionManager:
         self.rooms.setdefault(user_id, []).append(ws)
         logger.info(f"[WS] New connection in room '{user_id}'. Total: {len(self.rooms[user_id])}")
 
+    def register_ws_role(self, ws: WebSocket, role: str) -> None:
+        """Tie a live WebSocket object to its role for accurate status queries."""
+        self.ws_roles[id(ws)] = role
+
+    def unregister_ws_role(self, ws: WebSocket) -> None:
+        self.ws_roles.pop(id(ws), None)
+
+    def is_role_in_room(self, session_id: str, role: str) -> bool:
+        """True if any currently-open socket in this room has the given role."""
+        return any(
+            self.ws_roles.get(id(ws)) == role
+            for ws in self.rooms.get(session_id, [])
+        )
+
     def mark_human_joined(self, user_id: str):
         self.has_human[user_id] = True
+
+    def mark_human_left(self, session_id: str):
+        self.has_human[session_id] = False
 
     def human_has_joined(self, user_id: str) -> bool:
         return self.has_human.get(user_id, False)
@@ -409,10 +429,14 @@ class ConnectionManager:
     def mark_user_joined(self, session_id: str):
         self.has_user[session_id] = True
 
+    def mark_user_left(self, session_id: str):
+        self.has_user[session_id] = False
+
     def user_has_joined(self, session_id: str) -> bool:
         return self.has_user.get(session_id, False)
 
     def disconnect(self, user_id: str, ws: WebSocket):
+        self.unregister_ws_role(ws)
         if user_id in self.rooms:
             self.rooms[user_id] = [c for c in self.rooms[user_id] if c is not ws]
             if not self.rooms[user_id]:
@@ -447,6 +471,7 @@ class ConnectionManager:
         message = json.dumps(payload)
         ws_list = self.rooms.get(user_id, []).copy()
         for ws in ws_list:
+            self.unregister_ws_role(ws)
             try:
                 await ws.send_text(message)
                 await ws.close()
@@ -919,6 +944,7 @@ async def human_chat_ws(websocket: WebSocket, session_id: str):
 
     # 7. Accept WebSocket and register in the session room
     await manager.connect(session_id, websocket)
+    manager.register_ws_role(websocket, role)
     if role == "human_counselor":
         logger.info(
             f"[WS CHAT] ✓ CONNECTED | role=counselor | session={session_id}"

@@ -87,25 +87,28 @@ async def custom_validation_exception_handler(request, exc):
     - Uses only the terminal (most specific) field name so mobile clients
       receive plain names like 'email' instead of 'body -> common_fields -> email'.
     """
-    errors = []
-    for error in exc.errors():
-        loc = error.get("loc", [])
-        # Drop the leading 'body' segment if present (Pydantic v2 artefact)
-        loc_parts = [str(p) for p in loc if str(p) != "body"]
-        # Use the last segment as the field name (most specific identifier)
-        field = loc_parts[-1] if loc_parts else "unknown"
-        errors.append({
-            "field": field,
-            "message": error.get("msg", "Invalid value"),
-            "type": error.get("type", "value_error"),
-        })
+    all_errors = exc.errors()
+    # Return only the first error so the mobile app can guide the user
+    # one field at a time (email → phone → gender → …) rather than
+    # overwhelming them with every problem at once.
+    first = all_errors[0] if all_errors else {}
+    loc = first.get("loc", [])
+    loc_parts = [str(p) for p in loc if str(p) != "body"]
+    field = loc_parts[-1] if loc_parts else "unknown"
+    error_message = first.get("msg", "Invalid value")
 
     return JSONResponse(
         status_code=400,
         content={
             "error_code": "VALIDATION_ERROR",
-            "message": "One or more fields failed validation. Please check your input.",
-            "details": errors,
+            "message": error_message,
+            "details": [
+                {
+                    "field": field,
+                    "message": error_message,
+                    "type": first.get("type", "value_error"),
+                }
+            ],
         },
     )
 

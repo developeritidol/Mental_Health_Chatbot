@@ -225,22 +225,25 @@ async def mobile_register(payload: NestedRegisterPayload):
         # Translate Pydantic errors into the same structured format as the
         # global RequestValidationError handler so mobile clients always
         # receive consistent, field-specific error messages.
-        errors = []
-        for err in e.errors():
-            # Strip the leading 'body' segment that Pydantic adds internally
-            loc_parts = [str(part) for part in err.get("loc", [])]
-            field = loc_parts[-1] if loc_parts else "unknown"
-            errors.append({
-                "field": field,
-                "message": err.get("msg", "Invalid value"),
-                "type": err.get("type", "value_error"),
-            })
+        # Return only the first error so the Android app can show one
+        # validation message at a time and guide the user field by field.
+        all_errs = e.errors()
+        first = all_errs[0] if all_errs else {}
+        loc_parts = [str(p) for p in first.get("loc", [])]
+        field = loc_parts[-1] if loc_parts else "unknown"
+        error_message = first.get("msg", "Invalid value")
         return JSONResponse(
             status_code=400,
             content={
                 "error_code": "VALIDATION_ERROR",
-                "message": "One or more fields failed validation. Please check your input.",
-                "details": errors,
+                "message": error_message,
+                "details": [
+                    {
+                        "field": field,
+                        "message": error_message,
+                        "type": first.get("type", "value_error"),
+                    }
+                ],
             },
         )
 

@@ -13,9 +13,11 @@ POST /api/users/logout
 import re
 import uuid
 from typing import Literal
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta, timezone
+from pydantic import ValidationError
 from app.core.auth.oauth2 import get_current_user
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from passlib.context import CryptContext
@@ -202,7 +204,7 @@ async def mobile_register(payload: NestedRegisterPayload):
         "age": payload.common_fields.age,
         "phone_number": payload.common_fields.phone_number,
     }
-    
+
     if not flat_data["is_user"]:
         flat_data.update({
             "city": payload.admin_registration.city,
@@ -214,13 +216,34 @@ async def mobile_register(payload: NestedRegisterPayload):
             "practice_type": payload.admin_registration.practice_type,
             "consultation_mode": payload.admin_registration.consultation_mode,
         })
-        
+
     try:
-        # Validate through the standard Pydantic schema
+        # Validate through the standard Pydantic schema.
+        # Pydantic v2 raises ValidationError (not ValueError) on model construction.
         validated_request = UserCreateRequest(**flat_data)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-        
+    except ValidationError as e:
+        # Translate Pydantic errors into the same structured format as the
+        # global RequestValidationError handler so mobile clients always
+        # receive consistent, field-specific error messages.
+        errors = []
+        for err in e.errors():
+            # Strip the leading 'body' segment that Pydantic adds internally
+            loc_parts = [str(part) for part in err.get("loc", [])]
+            field = loc_parts[-1] if loc_parts else "unknown"
+            errors.append({
+                "field": field,
+                "message": err.get("msg", "Invalid value"),
+                "type": err.get("type", "value_error"),
+            })
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error_code": "VALIDATION_ERROR",
+                "message": "One or more fields failed validation. Please check your input.",
+                "details": errors,
+            },
+        )
+
     # Delegate to the main standard registration logic
     return await user_register(validated_request)
 

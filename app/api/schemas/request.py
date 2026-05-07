@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, EmailStr, model_validator
+from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator
 from typing import Optional
 from enum import Enum
 
@@ -72,13 +72,58 @@ class RoleSection(BaseModel):
     definition: RoleDefinition
 
 class CommonFields(BaseModel):
-    first_name: str
-    last_name: str
-    email: str
-    password: str
+    first_name: str = Field(..., min_length=1, max_length=50, description="First name (1-50 characters)")
+    last_name: str = Field(..., min_length=1, max_length=50, description="Last name (1-50 characters)")
+    email: EmailStr = Field(..., description="Valid email address")
+    password: str = Field(..., min_length=8, max_length=128, description="Password (8-128 characters)")
     gender: Optional[str] = None
-    age: Optional[int] = None
-    phone_number: str = Field(..., pattern=r"^\+[1-9]\d{3,14}$")
+    age: Optional[int] = Field(default=None, ge=13, le=150, description="Age must be between 13 and 150")
+    phone_number: str = Field(..., pattern=r"^\+[1-9]\d{3,14}$", description="Phone number in E.164 format (e.g. +911234567890)")
+
+    @field_validator("first_name", mode="before")
+    @classmethod
+    def validate_first_name(cls, v):
+        if not v or not str(v).strip():
+            raise ValueError("First name must not be empty")
+        return str(v).strip()
+
+    @field_validator("last_name", mode="before")
+    @classmethod
+    def validate_last_name(cls, v):
+        if not v or not str(v).strip():
+            raise ValueError("Last name must not be empty")
+        return str(v).strip()
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def validate_password_strength(cls, v):
+        import re
+        if not v or len(str(v)) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        if len(str(v)) > 128:
+            raise ValueError("Password must not exceed 128 characters")
+        pattern = re.compile(r"^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,128}$")
+        if not pattern.match(str(v)):
+            raise ValueError(
+                "Password must include at least one uppercase letter, "
+                "one number, and one special character"
+            )
+        return v
+
+    @field_validator("gender", mode="before")
+    @classmethod
+    def validate_gender(cls, v):
+        if v is None:
+            return v
+        # Normalise underscore variants (e.g. 'non_binary' → 'non-binary')
+        normalised = str(v).replace("_", "-").lower().strip()
+        _ALLOWED = {"male", "female", "non-binary", "prefer-not-to-say"}
+        if normalised not in _ALLOWED:
+            raise ValueError(
+                f"Invalid gender '{v}'. "
+                "Allowed values are: male, female, non-binary, prefer-not-to-say"
+            )
+        return normalised
 
 class AdminRegistration(BaseModel):
     city: Optional[str] = None
@@ -119,6 +164,26 @@ class UserCreateRequest(BaseModel):
     is_user: bool = Field(..., description="True for patient, False for counselor/admin")
     gender: GenderEnum
     age: int = Field(..., ge=13, le=150)
+
+    @field_validator("gender", mode="before")
+    @classmethod
+    def normalise_gender(cls, v):
+        """
+        Pydantic v2 does not reliably call the _missing_ classmethod on enums.
+        This validator normalises underscore variants before enum coercion so that
+        both 'non_binary' and 'non-binary' are accepted, and provides a clear
+        human-readable error listing all valid choices.
+        """
+        if v is None:
+            raise ValueError("Gender is required")
+        normalised = str(v).replace("_", "-").lower().strip()
+        _VALID = {m.value for m in GenderEnum}
+        if normalised not in _VALID:
+            raise ValueError(
+                f"Invalid gender '{v}'. "
+                "Accepted values: male, female, non-binary, prefer-not-to-say"
+            )
+        return normalised
 
     # Counselor-specific fields
     professional_role: Optional[str] = None

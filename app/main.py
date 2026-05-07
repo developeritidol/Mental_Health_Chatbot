@@ -81,10 +81,19 @@ async def custom_validation_exception_handler(request, exc):
     """
     Intercepts Pydantic's default 422 Unprocessable Entity and returns
     a mobile-friendly 400 Bad Request with structured error details.
+
+    Field path cleaning:
+    - Strips the leading 'body' segment Pydantic injects for request bodies.
+    - Uses only the terminal (most specific) field name so mobile clients
+      receive plain names like 'email' instead of 'body -> common_fields -> email'.
     """
     errors = []
     for error in exc.errors():
-        field = " -> ".join(str(loc) for loc in error.get("loc", []))
+        loc = error.get("loc", [])
+        # Drop the leading 'body' segment if present (Pydantic v2 artefact)
+        loc_parts = [str(p) for p in loc if str(p) != "body"]
+        # Use the last segment as the field name (most specific identifier)
+        field = loc_parts[-1] if loc_parts else "unknown"
         errors.append({
             "field": field,
             "message": error.get("msg", "Invalid value"),

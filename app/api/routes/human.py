@@ -66,6 +66,15 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed.")
 
+    # Validate that the counselor is checked in before showing the escalation list
+    doctor_id = str(current_provider.get("user_id") or current_provider.get("_id"))
+    counselor_doc = await db.admins.find_one({"_id": ObjectId(doctor_id)})
+    if not counselor_doc or not counselor_doc.get("is_online", False):
+        raise HTTPException(
+            status_code=403, 
+            detail="You must be checked in (online) to view the escalation list."
+        )
+
     query = {"is_escalated": True}
     if user_id:
         query["user_id"] = user_id
@@ -341,27 +350,18 @@ async def get_ws_status(session_id: str, current_user=Depends(get_current_user))
     """
     Returns the live WebSocket connection state for a given session.
 
-    - is_socket_connected    — True when the session is escalated (human handoff active)
-    - is_user_connected      — the patient has an active WebSocket connection
+    - is_socket_connected   — at least one WebSocket is open in this session room
+    - is_user_connected     — the patient has an active WebSocket connection
     - is_counselor_connected — a human counselor has joined the session room
     """
     is_user = manager.is_role_in_room(session_id, "user")
     is_counselor = manager.is_role_in_room(session_id, "human_counselor")
-
-    db = get_database()
-    is_escalated = False
-    if db is not None:
-        session_doc = await db.sessions.find_one(
-            {"session_id": session_id}, {"is_escalated": 1}
-        )
-        is_escalated = bool((session_doc or {}).get("is_escalated", False))
-
     return WebSocketStatusResponse(
         status="success",
         session_id=session_id,
         is_user_connected=is_user,
         is_counselor_connected=is_counselor,
-        is_socket_connected=is_escalated,
+        is_socket_connected=is_user and is_counselor,
     )
 
 

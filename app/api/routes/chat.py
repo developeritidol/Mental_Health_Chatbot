@@ -52,13 +52,27 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 # the crisis fork is reached.  Only add phrases that are unambiguous — if a
 # phrase could appear inside a genuine crisis message leave it out.
 _ANTI_CRISIS_PHRASES = (
-    "i don't want to die", "i dont want to die",
-    "i want to live", "i want to keep living",
-    "i'm not suicidal", "im not suicidal", "not suicidal",
+    # Explicit desire to live / negated death reference
+    "i don't want to die",      "i dont want to die",
+    "i want to live",           "i want to keep living",
+    # Explicit denial of suicidal intent
+    "i'm not suicidal",         "im not suicidal",          "not suicidal",
+    "i'm not thinking about",   "not thinking about hurting",
     "i don't want to hurt myself", "i dont want to hurt myself",
-    "i won't hurt myself", "i wont hurt myself",
-    "i'm scared of dying", "im scared of dying",
-    "afraid of dying", "fear of dying", "fear of death", "scared of death",
+    "i won't hurt myself",      "i wont hurt myself",
+    # Fear of death (not suicidal ideation)
+    "i'm scared of dying",      "im scared of dying",
+    "afraid of dying",          "fear of dying",
+    "fear of death",            "scared of death",
+    "afraid of death",
+    # Common vague-distress idioms — distress but NOT self-harm intent
+    "i feel like dying",        "i feel dead inside",
+    "this is killing me",       "killing me",
+    "i want to disappear",      "want to disappear",
+    "i want to escape",         "i want to run away",
+    "i want to end this pain",  "end this suffering",
+    "i can't take this anymore","cant take this anymore",
+    "exhausted of living like",
 )
 
 # Phrases that signal the user wants to keep talking to the AI, not a human.

@@ -1,22 +1,22 @@
 """
 Safety & Consensus Service
 ──────────────────────────
-This acts as the Hybrid Consensus Synthesizer (Llama-3-8b).
+This acts as the Hybrid Consensus Synthesizer (GPT-4o-mini).
 It reads the raw user text AND the RoBERTa statistical emotion,
 cross-validates them, and generates a structured clinical JSON
 containing the logical category, true sentiment, and an active crisis flag.
 """
 from __future__ import annotations
 import json
-from groq import AsyncGroq
+from openai import AsyncOpenAI
 from app.core.config import get_settings
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 settings = get_settings()
 
-def _get_client() -> AsyncGroq:
-    return AsyncGroq(api_key=settings.GROQ_API_KEY)
+def _get_client() -> AsyncOpenAI:
+    return AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
 
 async def synthesize_consensus(text: str, roberta_emotion: str, roberta_score: float) -> dict:
@@ -36,34 +36,65 @@ async def synthesize_consensus(text: str, roberta_emotion: str, roberta_score: f
         "and synthesize them into a logical consensus.\n"
         "You must respond in strictly valid JSON with exactly these keys:\n"
         '{"llm_sentiment": "string", "category": "string", "is_crisis": boolean, "wants_counselor": boolean, "reasoning": "string"}\n\n'
-        "RULES:\n"
-        "1. Dynamic Category: Discover the category freely based on the text (e.g., 'severe_burnout', 'relationship_conflict', 'financial_stress').\n"
-        "2. is_crisis MUST be exactly false unless the user expresses a POSITIVE, DIRECT desire to harm themselves or end their life.\n"
-        "   CRITICAL — the following MUST keep is_crisis=false even though they mention death or dying:\n"
-        "     - 'I don't want to die' / 'I dont want to die' — this expresses the desire to LIVE, NOT suicidal intent.\n"
-        "     - 'I want to live' / 'I want to keep living' — affirmation of life.\n"
-        "     - 'I'm not suicidal' / 'I'm not thinking about hurting myself' — explicit denial.\n"
-        "     - 'I'm scared of dying' / 'I'm afraid of death' — fear of death is NOT suicidal ideation.\n"
-        "     - 'I don't want to hurt myself' — negated self-harm reference.\n"
-        "   A negated or fear-based death reference signals the desire to LIVE. Never set is_crisis=true for these.\n"
-        "3. wants_counselor MUST be true ONLY when the user explicitly names a human professional or human intermediary by role. "
-        "The ONLY phrases that set it true: 'I want to talk to a real person', 'can I speak to a counselor', 'I need a therapist', "
-        "'connect me to a human', 'I want professional help', 'is there a real person I can talk to', 'I want to speak to a doctor', "
-        "'get me a human agent'. "
-        "CRITICAL — these MUST set wants_counselor to false:\n"
-        "  - User asks the AI to listen, talk, or stay with them ('could you talk for a bit', 'just listen to me', 'stay with me', 'check in on me', 'be there for me').\n"
-        "  - User explicitly prefers the AI over a human ('I want to talk to you only', 'I only want to talk to you', 'I don't want a human', 'just you', 'not a real person').\n"
-        "  - User vents emotions, describes struggles, or asks the AI a question — no matter how distressed they sound.\n"
-        "  - User says they don't need help being fixed or referred ('I don't need you to fix anything', 'I just need someone to listen').\n"
-        "If there is ANY ambiguity, default wants_counselor to false.\n"
-        "4. Reasoning: Provide a brief 1-sentence explanation of why is_crisis is true or false."
+        "RULES:\n\n"
+
+        "1. CATEGORY: Identify the emotional theme freely (e.g. 'severe_burnout', 'relationship_conflict', "
+        "'financial_stress', 'grief', 'anxiety', 'loneliness').\n\n"
+
+        "2. IS_CRISIS — set true ONLY when the user makes a DIRECT, POSITIVE statement of intent to harm "
+        "themselves or end their life RIGHT NOW.\n"
+        "   TRUE (is_crisis=true):\n"
+        "     - 'I want to kill myself'\n"
+        "     - 'I am going to end my life'\n"
+        "     - 'I have a plan to suicide'\n"
+        "     - 'I want to hurt myself'\n"
+        "     - 'I've been cutting myself'\n\n"
+        "   FALSE — NEVER set is_crisis=true for these even though they mention death, pain, or ending:\n"
+        "     NEGATIONS (desire to live): 'I don't want to die', 'I dont want to die', "
+        "'I want to live', 'I want to keep living', 'I'm not suicidal', 'im not suicidal', "
+        "'I'm not thinking of hurting myself', 'I don't want to hurt myself'\n"
+        "     FEAR (not intent): 'I'm scared of dying', 'I'm afraid of death', 'afraid of dying', "
+        "'scared of death', 'fear of death'\n"
+        "     IDIOMS/METAPHORS: 'this is killing me', 'I could kill for...', "
+        "'I'm dying of embarrassment', 'I'm dying of laughter'\n"
+        "     VAGUE DISTRESS (no self-harm intent): 'I feel like dying', 'I feel dead inside', "
+        "'I want to disappear', 'I want to escape', 'I want to run away', "
+        "'I want to end this pain', 'I want to end this suffering', "
+        "'I can't take this anymore', 'I'm exhausted of living like this'\n"
+        "     PAST TENSE / HISTORICAL: 'I used to think about suicide' (past, not present plan)\n\n"
+        "   AMBIGUOUS RULE: If the text contains both a crisis phrase AND a negation/fear qualifier, "
+        "the negation wins — keep is_crisis=false.\n"
+        "   DEFAULT: When in doubt, set is_crisis=false. A counselor can always escalate manually; "
+        "a false alarm that disconnects a user from the AI every conversation is harmful.\n\n"
+
+        "3. WANTS_COUNSELOR — set true ONLY when the user explicitly requests a named human role.\n"
+        "   TRUE (wants_counselor=true):\n"
+        "     - 'I want to talk to a real person / human'\n"
+        "     - 'Can I speak to a counselor / therapist / doctor?'\n"
+        "     - 'Connect me to a human'\n"
+        "     - 'I want professional help'\n"
+        "     - 'Is there a real person I can talk to?'\n"
+        "     - 'Get me a human agent'\n\n"
+        "   FALSE — NEVER set wants_counselor=true for:\n"
+        "     TALKING TO AI: 'just listen to me', 'stay with me', 'be there for me', "
+        "'talk for a bit', 'check in on me', 'could you talk with me'\n"
+        "     AI PREFERENCE: 'I only want to talk to you', 'I want to talk to you only', "
+        "'I don't want a human', 'not a real person', 'just you'\n"
+        "     VAGUE REQUESTS: 'I need help', 'can someone help me', "
+        "'I want to talk to someone' (someone ≠ human professional)\n"
+        "     VENTING / ASKING AI: user describes struggles or asks the AI a question — "
+        "no matter how distressed they sound\n"
+        "     NO FIX NEEDED: 'I just need someone to listen', 'I don't need you to fix anything'\n\n"
+        "   DEFAULT: Any ambiguity → wants_counselor=false.\n\n"
+
+        "4. REASONING: One sentence explaining the is_crisis decision."
     )
     
     user_prompt = f"User Text: \"{text}\"\nRaw RoBERTa Emotion: {roberta_emotion} (score: {roberta_score:.2f})"
     
     try:
         response = await client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=settings.SYNTHESIZER_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}

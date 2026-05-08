@@ -294,9 +294,19 @@ async def checkin_checkout(
         logger.info(f"[CHECKIN] Counselor {doctor_id} checked IN via REST.")
         return {"status": "success", "message": "Check-in successful"}
     else:
+        active_count = await db.sessions.count_documents({
+            "assigned_counselor_id": doctor_id,
+            "is_escalated": True,
+        })
+        if active_count > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"You have {active_count} active session(s). "
+                       "Please close them before checking out.",
+            )
         await db.admins.update_one(
             {"_id": ObjectId(doctor_id)},
-            {"$set": {"is_online": False, "current_active_sessions": 0}},
+            {"$set": {"is_online": False}},
         )
         mark_counselor_disconnected(doctor_id)
         logger.info(f"[CHECKOUT] Counselor {doctor_id} checked OUT via REST.")

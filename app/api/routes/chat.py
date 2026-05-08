@@ -46,6 +46,24 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 # Phrases that signal the user wants to keep talking to the AI, not a human.
 # Checked against the lowercased message BEFORE the counselor-redirect branch
 # so a mis-fire from the small Llama model cannot trigger an unwanted handoff.
+# Phrases that unambiguously signal the desire to LIVE, not to self-harm.
+# If the small Llama model mis-fires is_crisis=True on a negated death reference
+# (e.g. "I don't want to die"), this guard forces it back to False before
+# the crisis fork is reached.  Only add phrases that are unambiguous — if a
+# phrase could appear inside a genuine crisis message leave it out.
+_ANTI_CRISIS_PHRASES = (
+    "i don't want to die", "i dont want to die",
+    "i want to live", "i want to keep living",
+    "i'm not suicidal", "im not suicidal", "not suicidal",
+    "i don't want to hurt myself", "i dont want to hurt myself",
+    "i won't hurt myself", "i wont hurt myself",
+    "i'm scared of dying", "im scared of dying",
+    "afraid of dying", "fear of dying", "fear of death", "scared of death",
+)
+
+# Phrases that signal the user wants to keep talking to the AI, not a human.
+# Checked against the lowercased message BEFORE the counselor-redirect branch
+# so a mis-fire from the small Llama model cannot trigger an unwanted handoff.
 _AI_PREFERENCE_PHRASES = (
     "talk to you only", "talk to you alone", "only want to talk to you",
     "just want to talk to you", "i want to talk to you", "talk with you only",
@@ -279,8 +297,14 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
         logger.error(f"[STEP 2 ERROR] {e}")
         consensus = _safe_fallback_consensus()
 
-    # ── Counselor request detection — user explicitly asked for a human ───────
     _msg_lower = req.message.lower()
+
+    # ── Anti-crisis guard — suppress false-positive crisis on negated/fear phrases ──
+    if consensus.get("is_crisis") is True and any(p in _msg_lower for p in _ANTI_CRISIS_PHRASES):
+        logger.info(f"[CRISIS_GUARD] Suppressed false-positive crisis — anti-crisis phrase detected: '{req.message[:80]}'")
+        consensus["is_crisis"] = False
+
+    # ── Counselor request detection — user explicitly asked for a human ───────
     if consensus.get("wants_counselor") is True and any(p in _msg_lower for p in _AI_PREFERENCE_PHRASES):
         logger.info(f"[COUNSELOR_REQUEST] Suppressed — user message indicates AI preference: '{req.message[:80]}'")
         consensus["wants_counselor"] = False

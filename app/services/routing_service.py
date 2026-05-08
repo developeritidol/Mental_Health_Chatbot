@@ -332,7 +332,13 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
             f"(category: {crisis_category})."
         )
 
-        await _notify_counselor(counselor_id_str, session_id, crisis_category, user_id)
+        await _notify_counselor(
+            counselor_id_str,
+            session_id,
+            crisis_category,
+            user_id,
+            broadcast_to_all=not is_same_counselor,
+        )
 
     except Exception:
         logger.exception(f"[ROUTING] Unhandled error routing session {session_id}")
@@ -433,6 +439,7 @@ async def _notify_counselor(
     session_id: str,
     crisis_category: str,
     user_id: str,
+    broadcast_to_all: bool = True,
 ) -> None:
     """
     Sends two notifications:
@@ -477,15 +484,19 @@ async def _notify_counselor(
                 f"used broadcast_to_dashboard fallback."
             )
 
-        # 2 — Broadcast: queue activity visible to all admins/counselors
-        await ws_manager.broadcast_to_dashboard({
-            "type": "new_escalation",
-            "assigned_counselor_id": counselor_id,
-            "session_id": session_id,
-            "user_id": user_id,
-            "crisis_category": crisis_category,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
+        # 2 — Broadcast: queue activity visible to all counselors.
+        # Suppressed when the user is returning to their previous counselor
+        # (broadcast_to_all=False) so other counselors are not incorrectly
+        # notified about a session that is already privately assigned.
+        if broadcast_to_all:
+            await ws_manager.broadcast_to_dashboard({
+                "type": "new_escalation",
+                "assigned_counselor_id": counselor_id,
+                "session_id": session_id,
+                "user_id": user_id,
+                "crisis_category": crisis_category,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
 
     except Exception as e:
         logger.warning(f"[ROUTING] Dashboard notification failed for counselor {counselor_id}: {e}")

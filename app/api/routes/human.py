@@ -733,23 +733,26 @@ async def _notify_assigned_counselor_user_waiting(
 
     if assigned_counselor_id and assigned_counselor_id != "__routing__":
         delivered = await manager.notify_counselor(assigned_counselor_id, payload)
-        if not delivered:
-            # Counselor's dashboard WS not in per-counselor registry — fall back to broadcast
-            await manager.broadcast_to_dashboard(payload)
-            logger.info(
-                f"[NOTIFY] ✓ Fallback broadcast | type=user_waiting_in_room | session={session_id}"
-                f" | counselor={assigned_counselor_id} (not in counselor_ws registry)"
-            )
-        else:
+        if delivered:
             logger.info(
                 f"[NOTIFY] ✓ Targeted push | type=user_waiting_in_room | session={session_id}"
                 f" | counselor={assigned_counselor_id}"
             )
+        else:
+            # Session is privately assigned — do NOT broadcast to all.
+            # The counselor may already be in the chat room (no dashboard WS needed)
+            # or will see the patient in their escalated-sessions list on next load.
+            logger.warning(
+                f"[NOTIFY] ⚠  user_waiting_in_room: counselor {assigned_counselor_id} not in "
+                f"counselor_ws — broadcast suppressed (private assignment, session={session_id})."
+            )
     else:
+        # No counselor assigned yet (routing in progress or first-time escalation).
+        # Broadcast so any available counselor can act.
         await manager.broadcast_to_dashboard(payload)
         logger.info(
-            f"[NOTIFY] ✓ Broadcast sent | type=user_waiting_in_room | session={session_id}"
-            f" | counselor=unassigned (routing in progress or no prior counselor)"
+            f"[NOTIFY] ✓ Broadcast | type=user_waiting_in_room | session={session_id}"
+            f" | reason=no counselor assigned yet"
         )
 
 

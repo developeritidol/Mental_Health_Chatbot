@@ -474,20 +474,30 @@ async def _notify_counselor(
         delivered = await ws_manager.notify_counselor(counselor_id, assigned_payload)
         if delivered:
             logger.info(
-                f"[ROUTING] [NOTIFY] ✓ Targeted assignment push delivered to counselor {counselor_id}."
+                f"[ROUTING] [NOTIFY] ✓ Targeted push delivered to counselor {counselor_id}."
             )
-        else:
-            # Dashboard WS not in per-counselor registry — fall back so assignment isn't lost
+        elif broadcast_to_all:
+            # New-counselor assignment and targeted push failed (counselor not in
+            # counselor_ws registry). Falling back to broadcast is acceptable here
+            # because queue visibility to all is already expected in this path.
             await ws_manager.broadcast_to_dashboard(assigned_payload)
             logger.warning(
                 f"[ROUTING] [NOTIFY] ⚠  Counselor {counselor_id} not in counselor_ws — "
-                f"used broadcast_to_dashboard fallback."
+                f"broadcast fallback used (new-counselor path)."
+            )
+        else:
+            # Private assignment (returning user → same counselor). Targeted push
+            # failed but we must NOT broadcast to all — the session is exclusively
+            # assigned and other counselors should not see it. The counselor will
+            # find the session in their escalated-sessions list on next poll/load.
+            logger.warning(
+                f"[ROUTING] [NOTIFY] ⚠  Private push to counselor {counselor_id} failed "
+                f"(not in counselor_ws) — broadcast suppressed to protect session privacy."
             )
 
-        # 2 — Broadcast: queue activity visible to all counselors.
-        # Suppressed when the user is returning to their previous counselor
-        # (broadcast_to_all=False) so other counselors are not incorrectly
-        # notified about a session that is already privately assigned.
+        # 2 — Queue activity broadcast: only for new-counselor assignments.
+        # When broadcast_to_all=False the session is privately re-assigned to
+        # the user's previous counselor — other counselors must not be notified.
         if broadcast_to_all:
             await ws_manager.broadcast_to_dashboard({
                 "type": "new_escalation",

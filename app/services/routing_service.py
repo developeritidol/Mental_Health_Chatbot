@@ -297,7 +297,7 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
         # If the selected counselor is different from the current active one,
         # we must atomically deactivate the old record and insert a new one.
         # If the same counselor is being reused, no changes to the table needed.
-        is_same_counselor = (preferred_id == counselor_id_str) if preferred_id else False
+        is_same_counselor = (str(preferred_id) == counselor_id_str) if preferred_id else False
 
         if not is_same_counselor:
             await _swap_assignment(db, user_id, counselor_id_str)

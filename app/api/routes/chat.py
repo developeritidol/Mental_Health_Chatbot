@@ -38,7 +38,6 @@ from app.services.db_service import (
     upsert_session,
 )
 from app.services.routing_service import get_available_counselor_count
-from app.api.routes.human import manager
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -169,7 +168,12 @@ async def manual_escalate(
         "reasoning": "User requested manual escalation via app button",
     }
 
-    # 4. Trigger the smart routing engine in the background
+    # 4. Trigger the smart routing engine in the background.
+    # The routing service exclusively owns all dashboard notifications:
+    # it sends a targeted push to the user's previous counselor (if online)
+    # or a broadcast to all counselors (if no preferred counselor / offline).
+    # Do NOT fire a pre-emptive broadcast here — it would notify every counselor
+    # before routing has determined who should actually receive the session.
     from app.services.routing_service import route_crisis_session
     asyncio.create_task(
         route_crisis_session(
@@ -178,15 +182,6 @@ async def manual_escalate(
             consensus=consensus,
         )
     )
-
-    # 5. Broadcast to all human dashboards so they see the queue activity
-    asyncio.create_task(manager.broadcast_to_dashboard({
-        "type": "new_escalation",
-        "session_id": actual_session_id,
-        "user_id": user_id,
-        "crisis_category": "manual_escalation",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }))
 
     return {"status": "success"}
 
@@ -355,6 +350,10 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
             consensus["is_crisis"] = False
 
     if consensus.get("is_crisis") is True:
+        # Routing service exclusively owns all dashboard notifications — do NOT
+        # broadcast here. It sends a targeted push to the preferred counselor
+        # (if online) or a broadcast to the full pool (fallback). A pre-emptive
+        # broadcast before routing fires would leak the session to every counselor.
         from app.services.routing_service import route_crisis_session
         asyncio.create_task(
             route_crisis_session(
@@ -363,14 +362,6 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
                 consensus=consensus,
             )
         )
-
-        asyncio.create_task(manager.broadcast_to_dashboard({
-            "type": "new_escalation",
-            "session_id": actual_session_id,
-            "user_id": user_id,
-            "crisis_category": consensus.get("category", "unknown"),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }))
 
         # Return a single done-event — no AI chunks, no dual response
         _settings = get_settings()

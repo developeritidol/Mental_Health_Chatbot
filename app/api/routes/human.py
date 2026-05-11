@@ -214,9 +214,21 @@ async def close_escalated_session(user_id: str, current_provider = Depends(get_c
         {"user_id": user_id, "is_escalated": True},
         sort=[("escalated_at", -1)],
     )
-    closing_session_id = session_doc.get("session_id") if session_doc else None
-    closing_crisis_category = (session_doc or {}).get("crisis_category", "unknown")
-    closing_handoff_summary = (session_doc or {}).get("handoff_summary", "")
+    if not session_doc:
+        raise HTTPException(status_code=404, detail="No active escalated session found.")
+
+    # Ownership validation — only the assigned counselor may close their own session.
+    assigned_id = session_doc.get("assigned_counselor_id")
+    provider_id = str(current_provider.get("user_id") or current_provider.get("_id") or "")
+    if assigned_id and assigned_id != "__routing__" and provider_id != str(assigned_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: You are not authorized to close a session assigned to another counselor.",
+        )
+
+    closing_session_id = session_doc.get("session_id")
+    closing_crisis_category = session_doc.get("crisis_category", "unknown")
+    closing_handoff_summary = session_doc.get("handoff_summary", "")
 
     try:
         await db.sessions.update_many(
@@ -1017,6 +1029,15 @@ async def human_chat_ws(websocket: WebSocket, session_id: str):
 
         manager.mark_human_joined(session_id)
         manager.cancel_timeout_task(session_id)
+
+        # Notify all dashboards that this session is now claimed so other counselors
+        # can dismiss the "Accept" button — do not await to avoid delaying the WS flow.
+        asyncio.create_task(manager.broadcast_to_dashboard({
+            "type": "session_claimed",
+            "session_id": session_id,
+            "counselor_id": authenticated_user_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }))
 
         # Fix 11: send placeholder immediately; start background task to push real summary
         if db is not None and session_doc is not None:

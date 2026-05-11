@@ -320,11 +320,14 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
 
     if consensus.get("wants_counselor") is True and not consensus.get("is_crisis"):
         logger.info(f"[COUNSELOR_REQUEST] User {user_id} requested a human counselor.")
+        _cfg = get_settings()
+        _base_url = f"http://{_cfg.SERVER_PUBLIC_HOST}:{_cfg.SERVER_PORT}"
         counselor_info_payload = {
             "done": True,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": "counselor_request",
             "message": "Of course — you can connect with a human counselor anytime using the button in the top right corner.",
+            "button_icon_url": f"{_base_url}/static/images/connect_counselor_btn.png",
         }
 
         async def _counselor_request_stream():

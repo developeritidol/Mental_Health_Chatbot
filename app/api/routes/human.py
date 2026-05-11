@@ -731,11 +731,26 @@ async def _notify_assigned_counselor_user_waiting(
     if assigned_counselor_id and assigned_counselor_id != "__routing__":
         payload["counselor_id"] = assigned_counselor_id
 
-    await manager.broadcast_to_dashboard(payload)
-    logger.info(
-        f"[NOTIFY] ✓ Broadcast sent | type=user_waiting_in_room | session={session_id}"
-        f" | counselor={assigned_counselor_id or 'unassigned'}"
-    )
+    if assigned_counselor_id and assigned_counselor_id != "__routing__":
+        delivered = await manager.notify_counselor(assigned_counselor_id, payload)
+        if not delivered:
+            # Counselor's dashboard WS not in per-counselor registry — fall back to broadcast
+            await manager.broadcast_to_dashboard(payload)
+            logger.info(
+                f"[NOTIFY] ✓ Fallback broadcast | type=user_waiting_in_room | session={session_id}"
+                f" | counselor={assigned_counselor_id} (not in counselor_ws registry)"
+            )
+        else:
+            logger.info(
+                f"[NOTIFY] ✓ Targeted push | type=user_waiting_in_room | session={session_id}"
+                f" | counselor={assigned_counselor_id}"
+            )
+    else:
+        await manager.broadcast_to_dashboard(payload)
+        logger.info(
+            f"[NOTIFY] ✓ Broadcast sent | type=user_waiting_in_room | session={session_id}"
+            f" | counselor=unassigned (routing in progress or no prior counselor)"
+        )
 
 
 # ── Handoff Summary Background Delivery (Fix 11) ─────────────────────────────
@@ -1125,18 +1140,22 @@ async def human_chat_ws(websocket: WebSocket, session_id: str):
                 f"[WS CHAT] ✗ DISCONNECTED | role=counselor | session={session_id}"
                 f" | counselor_id={authenticated_user_id} | name={counselor_name}"
             )
+            # Do NOT notify the user immediately — the 2-minute grace period gives the
+            # counselor time to reconnect (network blip, tab refresh) without alarming
+            # the user with a "disconnected" message followed by a "rejoined" message.
+            # _counselor_reconnect_grace() will notify the user if they don't return.
         else:
             logger.info(
                 f"[WS CHAT] ✗ DISCONNECTED | role=user | session={session_id} | user_id={authenticated_user_id}"
             )
-        leave_notice = {
-            "role": "system",
-            "text": f"{'Counselor' if role == 'human_counselor' else 'User'} has disconnected.",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "is_human": False,
-            "is_system": True,
-        }
-        await manager.broadcast(session_id, leave_notice, websocket)
+            leave_notice = {
+                "role": "system",
+                "text": "User has disconnected.",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "is_human": False,
+                "is_system": True,
+            }
+            await manager.broadcast(session_id, leave_notice, websocket)
 
     except Exception as e:
         logger.error(
@@ -1180,12 +1199,16 @@ async def _counselor_reconnect_grace(session_id: str, user_id: str, counselor_id
     """
     Gives the counselor a 2-minute window to reconnect after an unexpected disconnect
     (network blip, tab refresh) before closing the escalation.
-    If the counselor's WebSocket reconnects within that window, human_has_joined() will
-    return True and we skip the close.
+    Checks is_role_in_room() — not human_has_joined() — so it correctly detects
+    whether a counselor WebSocket is LIVE in the room, not just whether one ever joined.
+    If the counselor reconnects within the window, escalation is preserved silently.
+    If not, the user is notified and the session is returned to AI mode.
     """
     await asyncio.sleep(120)
 
-    if manager.human_has_joined(session_id):
+    # Use is_role_in_room so we check for a LIVE counselor socket, not the
+    # stale has_human flag which stays True as long as any client is in the room.
+    if manager.is_role_in_room(session_id, "human_counselor"):
         logger.info(f"[GRACE] Counselor {counselor_id} reconnected within grace period — escalation preserved.")
         return
 
@@ -1197,6 +1220,12 @@ async def _counselor_reconnect_grace(session_id: str, user_id: str, counselor_id
         return
     try:
         session_doc = await db.sessions.find_one({"session_id": session_id})
+
+        # Session may have been closed manually by another counselor or the watchdog
+        if not (session_doc or {}).get("is_escalated", False):
+            logger.info(f"[GRACE] Session {session_id} already closed — grace period exiting early.")
+            return
+
         crisis_category = (session_doc or {}).get("crisis_category", "unknown")
         handoff_summary = (session_doc or {}).get("handoff_summary", "")
 
@@ -1209,6 +1238,16 @@ async def _counselor_reconnect_grace(session_id: str, user_id: str, counselor_id
                 "updated_at": datetime.now(timezone.utc),
             }},
         )
+
+        # Notify the user so they are not left hanging in the chat room
+        await manager.send_to_all(session_id, {
+            "role": "system",
+            "text": "Your counselor has disconnected. You will be connected back to AI support.",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "is_human": False,
+            "is_system": True,
+            "type": "counselor_disconnected",
+        })
 
         asyncio.create_task(
             _generate_and_save_post_session_summaries(session_id, crisis_category, handoff_summary, db)

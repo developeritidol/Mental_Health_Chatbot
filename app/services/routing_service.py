@@ -35,7 +35,7 @@ from app.services.summarization_service import generate_clinical_handoff
 
 logger = logging.getLogger(__name__)
 
-_STALE_PING_SECONDS = 45
+_STALE_PING_SECONDS = 2100  # 35 minutes — counselor stays visible while idle
 _STALE_LOCK_MINUTES = 5
 
 
@@ -120,10 +120,30 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
     cursor = db.admins.find(query).sort("checked_in_at", 1)
     candidates = await cursor.to_list(length=20)
 
+    if candidates:
+        logger.info(f"[ROUTING] [FIFO] {len(candidates)} candidate(s) in queue (sorted by check-in time):")
+        for idx, c in enumerate(candidates):
+            cid = str(c.get("_id", ""))
+            name = f"{c.get('first_name', '')} {c.get('last_name', '')}".strip() or cid
+            checked_in = c.get("checked_in_at", "N/A")
+            active_sessions = c.get("current_active_sessions", 0)
+            ws_ok = is_counselor_connected(cid)
+            logger.info(
+                f"[ROUTING] [FIFO]   [{idx}] {name} (id={cid})"
+                f" | checked_in_at={checked_in} | active_sessions={active_sessions}"
+                f" | ws_connected={ws_ok}"
+            )
+    else:
+        logger.warning("[ROUTING] [FIFO] No candidates found in queue (no free, checked-in counselors).")
+
     for candidate in candidates:
         if _is_available(candidate):
+            cid = str(candidate.get("_id", ""))
+            name = f"{candidate.get('first_name', '')} {candidate.get('last_name', '')}".strip() or cid
+            logger.info(f"[ROUTING] [FIFO] ✓ Selected FIFO[0] available: {name} (id={cid})")
             return candidate
 
+    logger.warning("[ROUTING] [FIFO] No candidate passed availability gate (WS check or active_sessions).")
     return None
 
 
@@ -173,6 +193,11 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
 
     crisis_category = consensus.get("category", "unknown")
     force_exclude_id: Optional[str] = consensus.get("_exclude_counselor_id")
+
+    logger.info(
+        f"[ROUTING] ▶ NEW ESCALATION REQUEST | user={user_id} | session={session_id}"
+        f" | category={crisis_category}"
+    )
 
     try:
         # Fix 14: release stale __routing__ locks from past server crashes

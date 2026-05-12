@@ -886,9 +886,16 @@ async def dashboard_notifications_ws(websocket: WebSocket):
         mark_counselor_connected(counselor_id)
         counselor_display = counselor_id  # fallback; overwrite if DB lookup succeeds
         try:
+            _now = datetime.now(timezone.utc)
+            # Always refresh is_online and last_ping on connect
             await db.admins.update_one(
                 {"_id": ObjectId(counselor_id)},
-                {"$set": {"is_online": True, "last_ping": datetime.now(timezone.utc), "checked_in_at": datetime.now(timezone.utc)}},
+                {"$set": {"is_online": True, "last_ping": _now}},
+            )
+            # Only stamp checked_in_at the first time (not on WS reconnect) so FIFO position is preserved
+            await db.admins.update_one(
+                {"_id": ObjectId(counselor_id), "checked_in_at": {"$exists": False}},
+                {"$set": {"checked_in_at": _now}},
             )
             # Fetch name for log readability
             admin_doc = await db.admins.find_one(
@@ -931,19 +938,16 @@ async def dashboard_notifications_ws(websocket: WebSocket):
             heartbeat_task.cancel()
         if counselor_id and db is not None:
             mark_counselor_disconnected(counselor_id)
-            try:
-                # Always go offline when dashboard WebSocket closes.
-                # Active sessions can continue but the counselor must not receive new assignments
-                # while their dashboard is disconnected (prevents ghost-counselor routing).
-                await db.admins.update_one(
-                    {"_id": ObjectId(counselor_id)},
-                    {"$set": {"is_online": False}},
-                )
-                logger.info(
-                    f"[WS DASHBOARD] Counselor {counselor_id} is now OFFLINE | status=unavailable for routing"
-                )
-            except Exception as e:
-                logger.warning(f"[WS DASHBOARD] Could not clear online status for {counselor_id}: {e}")
+            # Do NOT set is_online=False here — a WS drop could be a brief browser
+            # refresh or network blip. The counselor is considered online until:
+            #   (a) they explicitly check out via REST, or
+            #   (b) last_ping goes stale (45s with no heartbeat).
+            # The in-memory connection_registry (is_counselor_connected) already gates
+            # FIFO routing, so a disconnected counselor won't receive new assignments.
+            logger.info(
+                f"[WS DASHBOARD] ✗ DISCONNECTED | counselor_id={counselor_id}"
+                f" | status=last_ping will expire in ~45s if not reconnected"
+            )
 
 
 # ── Human Chat WebSocket ──────────────────────────────────────────────────────

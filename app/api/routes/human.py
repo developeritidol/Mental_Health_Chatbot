@@ -75,7 +75,7 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
             detail="You must be checked in (online) to view the escalation list."
         )
 
-    query = {"is_escalated": True}
+    query = {"is_escalated": True, "assigned_counselor_id": doctor_id}
     if user_id:
         query["user_id"] = user_id
 
@@ -370,7 +370,7 @@ async def checkin_checkout(
     if is_online:
         await db.admins.update_one(
             {"_id": ObjectId(doctor_id)},
-            {"$set": {"is_online": True, "last_ping": datetime.now(timezone.utc)}},
+            {"$set": {"is_online": True, "last_ping": datetime.now(timezone.utc), "checked_in_at": datetime.now(timezone.utc)}},
         )
         mark_counselor_connected(doctor_id)
         logger.info(f"[CHECKIN] Counselor {doctor_id} checked IN via REST.")
@@ -388,7 +388,7 @@ async def checkin_checkout(
             )
         await db.admins.update_one(
             {"_id": ObjectId(doctor_id)},
-            {"$set": {"is_online": False}},
+            {"$set": {"is_online": False}, "$unset": {"checked_in_at": ""}},
         )
         mark_counselor_disconnected(doctor_id)
         logger.info(f"[CHECKOUT] Counselor {doctor_id} checked OUT via REST.")
@@ -888,7 +888,7 @@ async def dashboard_notifications_ws(websocket: WebSocket):
         try:
             await db.admins.update_one(
                 {"_id": ObjectId(counselor_id)},
-                {"$set": {"is_online": True, "last_ping": datetime.now(timezone.utc)}},
+                {"$set": {"is_online": True, "last_ping": datetime.now(timezone.utc), "checked_in_at": datetime.now(timezone.utc)}},
             )
             # Fetch name for log readability
             admin_doc = await db.admins.find_one(

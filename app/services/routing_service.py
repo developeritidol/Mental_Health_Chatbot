@@ -57,15 +57,14 @@ def _is_available(counselor_doc: dict) -> bool:
       1. is_online flag is True in DB
       2. Heartbeat is fresh (last_ping within _STALE_PING_SECONDS)
       3. Active WebSocket connection exists on this process (connection_registry)
-      4. Current sessions < max_concurrent_sessions
+      4. current_active_sessions == 0 (not currently in an active chat)
     """
     counselor_id = str(counselor_doc.get("_id", ""))
     return (
         counselor_doc.get("is_online", False)
         and _is_fresh(counselor_doc)
         and is_counselor_connected(counselor_id)
-        and counselor_doc.get("current_active_sessions", 0)
-        < counselor_doc.get("max_concurrent_sessions", 3)
+        and counselor_doc.get("current_active_sessions", 0) == 0
     )
 
 
@@ -108,6 +107,8 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
     query: dict = {
         "is_online": True,
         "last_ping": {"$gte": stale_cutoff},
+        "current_active_sessions": 0,
+        "checked_in_at": {"$exists": True},
     }
     if exclude_id:
         try:
@@ -115,8 +116,8 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
         except Exception:
             pass
 
-    # Fetch a batch sorted by load; filter to those with active WebSockets
-    cursor = db.admins.find(query).sort("current_active_sessions", 1)
+    # FIFO: sort by check-in time ascending so the longest-waiting free counselor is first
+    cursor = db.admins.find(query).sort("checked_in_at", 1)
     candidates = await cursor.to_list(length=20)
 
     for candidate in candidates:
@@ -337,7 +338,6 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
             session_id,
             crisis_category,
             user_id,
-            broadcast_to_all=not is_same_counselor,
         )
 
     except Exception:
@@ -439,14 +439,10 @@ async def _notify_counselor(
     session_id: str,
     crisis_category: str,
     user_id: str,
-    broadcast_to_all: bool = True,
 ) -> None:
     """
-    Sends two notifications:
-    1. Targeted push to the assigned counselor's dashboard WebSocket via notify_counselor().
-       Falls back to broadcast_to_dashboard() if the counselor's socket isn't tracked yet.
-    2. A broadcast to ALL dashboards with type="new_escalation" so other counselors
-       and admins can see live queue activity.
+    Sends a targeted push to the assigned counselor's dashboard WebSocket only.
+    No broadcast fallback — FIFO assignment means only one counselor should ever be notified.
     """
     logger.info(
         f"[ROUTING] [NOTIFY] Counselor {counselor_id} paged for "
@@ -476,37 +472,11 @@ async def _notify_counselor(
             logger.info(
                 f"[ROUTING] [NOTIFY] ✓ Targeted push delivered to counselor {counselor_id}."
             )
-        elif broadcast_to_all:
-            # New-counselor assignment and targeted push failed (counselor not in
-            # counselor_ws registry). Falling back to broadcast is acceptable here
-            # because queue visibility to all is already expected in this path.
-            await ws_manager.broadcast_to_dashboard(assigned_payload)
+        else:
             logger.warning(
                 f"[ROUTING] [NOTIFY] ⚠  Counselor {counselor_id} not in counselor_ws — "
-                f"broadcast fallback used (new-counselor path)."
+                f"targeted push failed; no broadcast fallback (FIFO assignment is exclusive)."
             )
-        else:
-            # Private assignment (returning user → same counselor). Targeted push
-            # failed but we must NOT broadcast to all — the session is exclusively
-            # assigned and other counselors should not see it. The counselor will
-            # find the session in their escalated-sessions list on next poll/load.
-            logger.warning(
-                f"[ROUTING] [NOTIFY] ⚠  Private push to counselor {counselor_id} failed "
-                f"(not in counselor_ws) — broadcast suppressed to protect session privacy."
-            )
-
-        # 2 — Queue activity broadcast: only for new-counselor assignments.
-        # When broadcast_to_all=False the session is privately re-assigned to
-        # the user's previous counselor — other counselors must not be notified.
-        if broadcast_to_all:
-            await ws_manager.broadcast_to_dashboard({
-                "type": "new_escalation",
-                "assigned_counselor_id": counselor_id,
-                "session_id": session_id,
-                "user_id": user_id,
-                "crisis_category": crisis_category,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
 
     except Exception as e:
         logger.warning(f"[ROUTING] Dashboard notification failed for counselor {counselor_id}: {e}")

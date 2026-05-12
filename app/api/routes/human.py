@@ -808,13 +808,12 @@ async def _notify_assigned_counselor_user_waiting(
                 f"counselor_ws — broadcast suppressed (private assignment, session={session_id})."
             )
     else:
-        # Routing did not complete within the wait window — counselor was already
-        # notified via _notify_counselor() when routing ran, or routing failed
-        # (no counselors available). Do NOT broadcast to all — FIFO assignment
-        # means only one counselor should ever receive this session.
-        logger.warning(
-            f"[NOTIFY] ⚠  user_waiting_in_room suppressed | session={session_id}"
-            f" | reason=routing incomplete after wait window"
+        # No counselor assigned yet (routing in progress or first-time escalation).
+        # Broadcast so any available counselor can act.
+        await manager.broadcast_to_dashboard(payload)
+        logger.info(
+            f"[NOTIFY] ✓ Broadcast | type=user_waiting_in_room | session={session_id}"
+            f" | reason=no counselor assigned yet"
         )
 
 
@@ -887,15 +886,9 @@ async def dashboard_notifications_ws(websocket: WebSocket):
         mark_counselor_connected(counselor_id)
         counselor_display = counselor_id  # fallback; overwrite if DB lookup succeeds
         try:
-            _now = datetime.now(timezone.utc)
             await db.admins.update_one(
                 {"_id": ObjectId(counselor_id)},
-                {"$set": {"is_online": True, "last_ping": _now}},
-            )
-            # Only set checked_in_at if not already present — preserves FIFO position on WS reconnect
-            await db.admins.update_one(
-                {"_id": ObjectId(counselor_id), "checked_in_at": {"$exists": False}},
-                {"$set": {"checked_in_at": _now}},
+                {"$set": {"is_online": True, "last_ping": datetime.now(timezone.utc), "checked_in_at": datetime.now(timezone.utc)}},
             )
             # Fetch name for log readability
             admin_doc = await db.admins.find_one(

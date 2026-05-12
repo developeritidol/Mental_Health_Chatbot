@@ -25,7 +25,7 @@ from bson import ObjectId
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends, Body, status
 from app.core.auth.JWTtoken import verify_token
 from app.core.database import get_database
-from app.core.connection_registry import mark_counselor_connected, mark_counselor_disconnected
+from app.core.connection_registry import mark_counselor_connected, mark_counselor_disconnected, is_counselor_connected
 from app.services.db_service import (
     save_message,
     get_escalated_sessions,
@@ -75,7 +75,11 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
             detail="You must be checked in (online) to view the escalation list."
         )
 
-    query = {"is_escalated": True, "assigned_counselor_id": doctor_id}
+    # Availability flags for the requesting counselor used in the session filter below
+    counselor_is_free = counselor_doc.get("current_active_sessions", 0) == 0
+    counselor_ws_active = is_counselor_connected(doctor_id)
+
+    query: dict = {"is_escalated": True}
     if user_id:
         query["user_id"] = user_id
 
@@ -197,8 +201,25 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
     sessions = []
     for doc in docs:
         uid = doc.get("user_id", "")
+        assigned_cid = doc.get("assigned_counselor_id")
+        previous_doctor_id = doctor_assignment_map.get(uid, False)
+
+        # ΓöÇΓöÇ Visibility filter ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+        # Case A ΓÇö returning patient: I am their previous counselor, I'm free and WS-connected.
+        #   (doctor_assignment_map already confirms the previous doctor is online.)
+        is_returning_patient_mine = (
+            previous_doctor_id == doctor_id
+            and counselor_is_free
+            and counselor_ws_active
+        )
+        # Case B ΓÇö routing/FIFO assigned this session directly to me.
+        is_routing_assigned = assigned_cid == doctor_id
+
+        if not is_returning_patient_mine and not is_routing_assigned:
+            continue  # this session is not for this counselor
+
         fn, ln = user_names.get(uid, ("Unknown", None))
-        cid = doc.get("assigned_counselor_id")
+        cid = assigned_cid
         cfn, cln = counselor_names.get(cid, (None, None)) if cid else (None, None)
         sessions.append({
             "session_id": doc.get("session_id"),
@@ -534,7 +555,7 @@ class ConnectionManager:
                     self.cancel_timeout_task(user_id)
         logger.info(f"[WS] Connection closed from room '{user_id}'.")
 
-    async def broadcast(self, user_id: str, payload: dict, sender_ws: WebSocket):
+    async def broadcast(self, user_id: str, payload: dict, sender_ws: Optional[WebSocket] = None):
         message = json.dumps(payload)
         dead = []
         for ws in self.rooms.get(user_id, []):
@@ -800,20 +821,19 @@ async def _notify_assigned_counselor_user_waiting(
                 f" | counselor={assigned_counselor_id}"
             )
         else:
-            # Session is privately assigned — do NOT broadcast to all.
-            # The counselor may already be in the chat room (no dashboard WS needed)
-            # or will see the patient in their escalated-sessions list on next load.
+            # Targeted push failed (counselor's dashboard WS may have disconnected after
+            # receiving counselor_assigned — e.g. they navigated to the chat page).
+            # Avoid broadcast to prevent duplicate notifications per Issue 2.
             logger.warning(
-                f"[NOTIFY] ⚠  user_waiting_in_room: counselor {assigned_counselor_id} not in "
-                f"counselor_ws — broadcast suppressed (private assignment, session={session_id})."
+                f"[NOTIFY] ⚠  user_waiting_in_room: targeted push failed for counselor "
+                f"{assigned_counselor_id} — not broadcasting to prevent duplicates."
             )
     else:
-        # No counselor assigned yet (routing in progress or first-time escalation).
-        # Broadcast so any available counselor can act.
-        await manager.broadcast_to_dashboard(payload)
+        # No counselor assigned yet. Ensure we do not broadcast duplicates.
+        # Fallback to targeted notification once routing engine completes assignment.
         logger.info(
-            f"[NOTIFY] ✓ Broadcast | type=user_waiting_in_room | session={session_id}"
-            f" | reason=no counselor assigned yet"
+            f"[NOTIFY] ✓ Skip broadcast | type=user_waiting_in_room | session={session_id}"
+            f" | reason=no counselor assigned yet, waiting for router"
         )
 
 
@@ -1213,9 +1233,7 @@ async def human_chat_ws(websocket: WebSocket, session_id: str):
                 "is_human_message": is_human,
             })
 
-            await manager.broadcast(session_id, payload, websocket)
-            ack = {**payload, "sent": True}
-            await websocket.send_text(json.dumps(ack))
+            await manager.broadcast(session_id, payload, None)
 
     except WebSocketDisconnect:
         manager.disconnect(session_id, websocket)

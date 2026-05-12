@@ -62,6 +62,7 @@ def _is_available(counselor_doc: dict) -> bool:
     counselor_id = str(counselor_doc.get("_id", ""))
     return (
         counselor_doc.get("is_online", False)
+        and counselor_doc.get("is_active", True)
         and _is_fresh(counselor_doc)
         and is_counselor_connected(counselor_id)
         and counselor_doc.get("current_active_sessions", 0) == 0
@@ -106,6 +107,7 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
     stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=_STALE_PING_SECONDS)
     query: dict = {
         "is_online": True,
+        "is_active": {"$ne": False},
         "last_ping": {"$gte": stale_cutoff},
         "current_active_sessions": 0,
         "checked_in_at": {"$exists": True},
@@ -158,6 +160,7 @@ async def get_available_counselor_count() -> int:
     stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=_STALE_PING_SECONDS)
     query: dict = {
         "is_online": True,
+        "is_active": {"$ne": False},
         "last_ping": {"$gte": stale_cutoff},
     }
     
@@ -498,9 +501,11 @@ async def _notify_counselor(
                 f"[ROUTING] [NOTIFY] ✓ Targeted push delivered to counselor {counselor_id}."
             )
         else:
+            # Targeted push failed — counselor_ws not populated yet.
+            # Avoid broadcast to prevent duplicate notifications per Issue 2.
             logger.warning(
                 f"[ROUTING] [NOTIFY] ⚠  Counselor {counselor_id} not in counselor_ws — "
-                f"targeted push failed; no broadcast fallback (FIFO assignment is exclusive)."
+                f"targeted push failed. Not broadcasting to prevent duplicates (session={session_id})."
             )
 
     except Exception as e:

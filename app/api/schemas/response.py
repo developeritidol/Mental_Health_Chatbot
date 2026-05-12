@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Union
 from datetime import datetime
 
 
@@ -75,6 +75,7 @@ class EscalatedSessionResponse(BaseModel):
     assigned_counselor_id: Optional[str] = None
     counselor_first_name: Optional[str] = None
     counselor_last_name: Optional[str] = None
+    doctor_id: Union[str, bool] = False
 
 
 class EscalatedSessionListResponse(BaseModel):

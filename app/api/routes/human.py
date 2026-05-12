@@ -134,6 +134,66 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
             except Exception:
                 pass
 
+    # Resolve doctor_id per session — the counselor the user last had a real
+    # session with. Three conditions must all be true to surface a doctor_id:
+    #   1. An active assignment exists in doctor_user_assignments (status=active)
+    #   2. That user has at least one previously CLOSED escalation (escalation_closed_at
+    #      set), proving a real session happened — not just a pending routing attempt.
+    #   3. That counselor is currently online (is_online=True in admins).
+    doctor_assignment_map: dict[str, str] = {}  # user_id → doctor_id string (online only)
+    if user_ids:
+        try:
+            # Step 1: active assignments
+            assign_cursor = db.doctor_user_assignments.find(
+                {"user_id": {"$in": user_ids}, "status": "active"},
+                {"user_id": 1, "doctor_id": 1},
+            )
+            assign_docs = await assign_cursor.to_list(length=None)
+
+            raw_map: dict[str, str] = {}  # user_id → doctor_id string
+            doctor_ids_to_check: list = []
+            for a in assign_docs:
+                did = str(a["doctor_id"])
+                raw_map[a["user_id"]] = did
+                doctor_ids_to_check.append(did)
+
+            # Step 2: which of those users have a previously completed session
+            users_with_history: set[str] = set()
+            if raw_map:
+                history_cursor = db.sessions.find(
+                    {
+                        "user_id": {"$in": list(raw_map.keys())},
+                        "escalation_closed_at": {"$exists": True, "$ne": None},
+                    },
+                    {"user_id": 1},
+                )
+                history_docs = await history_cursor.to_list(length=None)
+                users_with_history = {d["user_id"] for d in history_docs}
+
+            # Step 3: which of those doctors are currently online
+            online_doctor_ids: set[str] = set()
+            if doctor_ids_to_check:
+                valid_doctor_oids = []
+                for did in doctor_ids_to_check:
+                    try:
+                        valid_doctor_oids.append(ObjectId(did))
+                    except Exception:
+                        pass
+                if valid_doctor_oids:
+                    online_cursor = db.admins.find(
+                        {"_id": {"$in": valid_doctor_oids}, "is_online": True},
+                        {"_id": 1},
+                    )
+                    online_docs = await online_cursor.to_list(length=None)
+                    online_doctor_ids = {str(d["_id"]) for d in online_docs}
+
+            # Include doctor_id only when all three conditions are met
+            for uid, did in raw_map.items():
+                if uid in users_with_history and did in online_doctor_ids:
+                    doctor_assignment_map[uid] = did
+        except Exception:
+            pass
+
     sessions = []
     for doc in docs:
         uid = doc.get("user_id", "")
@@ -154,6 +214,7 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
             "assigned_counselor_id": cid,
             "counselor_first_name": cfn,
             "counselor_last_name": cln,
+            "doctor_id": doctor_assignment_map.get(uid, False),
         })
 
     formatted = [EscalatedSessionResponse(**s) for s in sessions]
@@ -1042,6 +1103,22 @@ async def human_chat_ws(websocket: WebSocket, session_id: str):
                 logger.info(f"[WS] Confirmed counselor {authenticated_user_id} written to session {session_id}.")
             except Exception as e:
                 logger.warning(f"[WS] Could not confirm counselor ID for session {session_id}: {e}")
+
+            # Stamp accepted_at the moment the counselor's WebSocket connects.
+            # Filter only on user_id + status (not doctor_id) to avoid a silent
+            # miss if token_data.user_id format ever diverges from the stored field.
+            # Idempotent — running on every join just refreshes the timestamp.
+            try:
+                result = await db.doctor_user_assignments.update_one(
+                    {"user_id": user_id, "status": "active"},
+                    {"$set": {"accepted_at": datetime.now(timezone.utc)}},
+                )
+                if result.matched_count:
+                    logger.info(f"[WS] accepted_at stamped on assignment for user {user_id}.")
+                else:
+                    logger.warning(f"[WS] No active assignment found to stamp accepted_at for user {user_id}.")
+            except Exception as e:
+                logger.warning(f"[WS] Could not stamp accepted_at for user {user_id}: {e}")
 
         heartbeat_task = asyncio.create_task(_counselor_heartbeat(authenticated_user_id))
 

@@ -313,4 +313,5 @@ class StreamChatRequest(BaseModel):
 # ── Human Intervention ────────────────────────────────────────────────────────
 
 class CheckinCheckoutRequest(BaseModel):
-    is_online: bool
+    is_online: Optional[bool] = None
+    is_active: Optional[bool] = None

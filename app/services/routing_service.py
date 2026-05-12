@@ -53,19 +53,25 @@ def _is_fresh(counselor_doc: dict) -> bool:
 
 def _is_available(counselor_doc: dict) -> bool:
     """
-    Returns True only when ALL four gates pass:
-      1. is_online flag is True in DB
-      2. Heartbeat is fresh (last_ping within _STALE_PING_SECONDS)
-      3. Active WebSocket connection exists on this process (connection_registry)
-      4. current_active_sessions == 0 (not currently in an active chat)
+    Returns True only when ALL gates pass (Requirements 2 & 4):
+      Condition 1: is_online flag is True in DB
+      Condition 1b: is_active flag is True in DB
+      Condition 2: connection status via websocket (connection_registry)
+      Condition 2b: not currently engaged (current_active_sessions == 0)
     """
     counselor_id = str(counselor_doc.get("_id", ""))
-    return (
-        counselor_doc.get("is_online", False)
-        and _is_fresh(counselor_doc)
-        and is_counselor_connected(counselor_id)
-        and counselor_doc.get("current_active_sessions", 0) == 0
+    is_online = counselor_doc.get("is_online", False)
+    is_active = counselor_doc.get("is_active", True)
+    ws_connected = is_counselor_connected(counselor_id)
+    not_engaged = counselor_doc.get("current_active_sessions", 0) == 0
+    fresh = _is_fresh(counselor_doc)
+
+    logger.info(
+        f"[AVAILABILITY] Counselor {counselor_id}: "
+        f"Online={is_online} | Active={is_active} | WS={ws_connected} | Free={not_engaged} | Fresh={fresh}"
     )
+
+    return is_online and is_active and ws_connected and not_engaged and fresh
 
 
 _CATEGORY_GROUPS: list[frozenset] = [
@@ -106,6 +112,7 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
     stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=_STALE_PING_SECONDS)
     query: dict = {
         "is_online": True,
+        "is_active": True,  # Requirement 4
         "last_ping": {"$gte": stale_cutoff},
         "current_active_sessions": 0,
         "checked_in_at": {"$exists": True},
@@ -257,13 +264,16 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
                 preferred_doc = await db.admins.find_one({"_id": ObjectId(preferred_id)})
             except Exception:
                 preferred_doc = None
+            
             if preferred_doc:
                 # ── Tier 2: Context Match ────────────────────────────────────
                 if _categories_match(crisis_category, user_doc.get("last_crisis_category")):
-                    # ── Tier 3: Availability Gate ────────────────────────────
+                    # ── Tier 3: Availability Gate (Requirement 3.2) ───────────
                     if _is_available(preferred_doc):
                         assigned_counselor = preferred_doc
-                        logger.info(f"[ROUTING] Preferred counselor {preferred_id} selected for session {session_id}.")
+                        logger.info(f"[ROUTING] [ESCALATION] Previous counselor {preferred_id} is available and matched.")
+                    else:
+                        logger.info(f"[ROUTING] [ESCALATION] Previous counselor {preferred_id} is NOT available (offline or busy).")
 
         # ── Fallback: Pool Search ─────────────────────────────────────────────
         if assigned_counselor is None:

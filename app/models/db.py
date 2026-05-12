@@ -70,6 +70,7 @@ class AdminModelDB(BaseModel):
     consultation_mode: str = ""
     # ── Smart Routing — Presence & Capacity ──────────────────────────────────
     is_online: bool = False
+    is_active: bool = True
     current_active_sessions: int = 0
     max_concurrent_sessions: int = 3
     last_ping: Optional[datetime] = None

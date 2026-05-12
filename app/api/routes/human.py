@@ -354,11 +354,9 @@ async def checkin_checkout(
 ):
     """
     Explicit REST check-in / check-out for counselors.
-    Allows mobile/REST-only dashboard clients to toggle availability
-    without relying on the WebSocket lifecycle.
     is_online: true = check-in, false = check-out
+    is_active: toggles administrative availability
     """
-    is_online = request.is_online
     if current_user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Only counselors can check in/out.")
 
@@ -367,32 +365,55 @@ async def checkin_checkout(
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed.")
 
-    if is_online:
-        await db.admins.update_one(
-            {"_id": ObjectId(doctor_id)},
-            {"$set": {"is_online": True, "last_ping": datetime.now(timezone.utc), "checked_in_at": datetime.now(timezone.utc)}},
-        )
-        mark_counselor_connected(doctor_id)
-        logger.info(f"[CHECKIN] Counselor {doctor_id} checked IN via REST.")
-        return {"status": "success", "message": "Check-in successful"}
-    else:
-        active_count = await db.sessions.count_documents({
-            "assigned_counselor_id": doctor_id,
-            "is_escalated": True,
-        })
-        if active_count > 0:
-            raise HTTPException(
-                status_code=400,
-                detail=f"You have {active_count} active session(s). "
-                       "Please close them before checking out.",
-            )
-        await db.admins.update_one(
-            {"_id": ObjectId(doctor_id)},
-            {"$set": {"is_online": False}, "$unset": {"checked_in_at": ""}},
-        )
-        mark_counselor_disconnected(doctor_id)
-        logger.info(f"[CHECKOUT] Counselor {doctor_id} checked OUT via REST.")
-        return {"status": "success", "message": "Check-out successful"}
+    update_doc = {}
+    unset_doc = {}
+    _now = datetime.now(timezone.utc)
+
+    # 1. Handle is_online
+    if request.is_online is not None:
+        update_doc["is_online"] = request.is_online
+        update_doc["last_ping"] = _now
+        if request.is_online:
+            # Force reset checked_in_at to NOW for FIFO prioritization
+            update_doc["checked_in_at"] = _now
+            mark_counselor_connected(doctor_id)
+        else:
+            # Prevent checkout if active sessions exist
+            active_count = await db.sessions.count_documents({
+                "assigned_counselor_id": doctor_id,
+                "is_escalated": True,
+            })
+            if active_count > 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"You have {active_count} active session(s). Please close them before checking out.",
+                )
+            unset_doc["checked_in_at"] = ""
+            mark_counselor_disconnected(doctor_id)
+
+    # 2. Handle is_active
+    if request.is_active is not None:
+        update_doc["is_active"] = request.is_active
+
+    if not update_doc and not unset_doc:
+        return {"status": "success", "message": "No changes provided"}
+
+    mongo_update = {"$set": update_doc}
+    if unset_doc:
+        mongo_update["$unset"] = unset_doc
+
+    await db.admins.update_one({"_id": ObjectId(doctor_id)}, mongo_update)
+    
+    action = "Updated"
+    if request.is_online is True: action = "Checked IN"
+    elif request.is_online is False: action = "Checked OUT"
+    
+    logger.info(f"[REST STATUS] Counselor {doctor_id} {action}. Payload={request.model_dump()}")
+    
+    return {
+        "status": "success", 
+        "message": f"{action} successful" if action != "Updated" else "Status updated"
+    }
 
 
 @router.get("/checkin-status", response_model=CounselorStatusResponse)
@@ -534,18 +555,27 @@ class ConnectionManager:
                     self.cancel_timeout_task(user_id)
         logger.info(f"[WS] Connection closed from room '{user_id}'.")
 
-    async def broadcast(self, user_id: str, payload: dict, sender_ws: WebSocket):
+    async def broadcast(self, session_id: str, payload: dict, sender_ws: WebSocket):
+        """
+        Synchronizes messages in real time for both parties in the active session room.
+        Requirement 1: Updates both directions regardless of sender.
+        """
         message = json.dumps(payload)
         dead = []
-        for ws in self.rooms.get(user_id, []):
+        recipients = self.rooms.get(session_id, [])
+        
+        for ws in recipients:
             if ws is sender_ws:
                 continue
             try:
                 await ws.send_text(message)
-            except Exception:
+                logger.info(f"[WS SYNC] Message delivered to recipient in room {session_id}")
+            except Exception as e:
+                logger.warning(f"[WS SYNC] Delivery failed in room {session_id}: {e}")
                 dead.append(ws)
+        
         for ws in dead:
-            self.disconnect(user_id, ws)
+            self.disconnect(session_id, ws)
 
     async def send_to_all(self, user_id: str, payload: dict):
         """Send a message and close all connections in a room.

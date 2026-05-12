@@ -109,7 +109,10 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
         "is_online": True,
         "is_active": {"$ne": False},
         "last_ping": {"$gte": stale_cutoff},
-        "current_active_sessions": 0,
+        "$or": [
+            {"current_active_sessions": 0},
+            {"current_active_sessions": {"$exists": False}}
+        ],
         "checked_in_at": {"$exists": True},
     }
     if exclude_id:
@@ -283,7 +286,7 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
             )
             hotline_text = (
                 "We're sorry, no counselors are available right now. "
-                "If you are in immediate danger, please call the National Crisis Helpline: 988."
+                "If you are in immediate danger, please call the National Crisis Helpline: 911."
             )
             await db.messages.insert_one({
                 "session_id": session_id,

@@ -25,7 +25,7 @@ CRISIS_LINES = {
     "BD": "Kaan Pete Roi (Bangladesh): 01779-554391",
 
     # North America
-    "US": "988 Suicide & Crisis Lifeline: call or text 988 | Crisis Text Line: text HOME to 741741",
+    "US": "911 Emergency: Call 911 immediately | Crisis Text Line: text HOME to 741741",
     "CA": "Crisis Services Canada: 1-833-456-4566 | Talk Suicide Canada: 1-833-456-4566",
     "MX": "SAPTEL (Mexico): 55 5259-8121 (24/7)",
 

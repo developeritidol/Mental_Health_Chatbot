@@ -692,7 +692,7 @@ async def _counselor_timeout_watchdog(session_id: str, user_id: str):
         "text": (
             "Our crisis counselors are currently unavailable. "
             "If you are in immediate danger, please call the crisis helpline: "
-            "988 (Suicide & Crisis Lifeline) or 112 (Emergency). "
+            "911 (Emergency). "
             "I'll stay with you and continue our conversation."
         ),
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -826,7 +826,25 @@ async def _notify_assigned_counselor_user_waiting(
             # Avoid broadcast to prevent duplicate notifications per Issue 2.
             logger.warning(
                 f"[NOTIFY] ⚠  user_waiting_in_room: targeted push failed for counselor "
-                f"{assigned_counselor_id} — not broadcasting to prevent duplicates."
+                f"{assigned_counselor_id} — triggering re-route to next available counselor."
+            )
+            # Trigger automatic assignment to the next available counselor in queue
+            from app.services.routing_service import route_crisis_session
+            from app.core.database import get_database
+            db = get_database()
+            if db:
+                await db.sessions.update_one(
+                    {"session_id": session_id},
+                    {"$set": {"assigned_counselor_id": None}}
+                )
+            reroute_consensus = {
+                "category": session_doc.get("crisis_category", "unknown") if session_doc else "unknown",
+                "is_crisis": True,
+                "_exclude_counselor_id": assigned_counselor_id
+            }
+            import asyncio
+            asyncio.create_task(
+                route_crisis_session(user_id=user_id, session_id=session_id, consensus=reroute_consensus)
             )
     else:
         # No counselor assigned yet. Ensure we do not broadcast duplicates.

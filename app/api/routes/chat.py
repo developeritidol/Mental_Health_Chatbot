@@ -155,12 +155,29 @@ async def manual_escalate(
         
     actual_session_id = session_data["session_id"]
 
-    # 2. Mark the session as escalated (is_escalated = True)
+    # 2. Check if any counselors are actually online before escalating
+    from app.services.routing_service import get_available_counselor_count
+    count = await get_available_counselor_count()
+    if count == 0:
+        hotline_text = "No counselor is available at the moment. Please call the helpline at 911."
+        db = get_database()
+        if db is not None:
+            await db.messages.insert_one({
+                "session_id": actual_session_id,
+                "user_id": user_id,
+                "role": "system",
+                "sender_type": "system",
+                "content": hotline_text,
+                "timestamp": datetime.now(timezone.utc),
+            })
+        return {"status": "failed", "message": hotline_text}
+
+    # 3. Mark the session as escalated (is_escalated = True)
     success = await escalate_session(actual_session_id)
     if not success:
         return {"status": "failed", "message": "Failed to escalate session"}
 
-    # 3. Create a pseudo-consensus to feed into the routing engine
+    # 4. Create a pseudo-consensus to feed into the routing engine
     consensus = {
         "is_crisis": True,
         "category": "manual_escalation",
@@ -168,7 +185,7 @@ async def manual_escalate(
         "reasoning": "User requested manual escalation via app button",
     }
 
-    # 4. Trigger the smart routing engine in the background.
+    # 5. Trigger the smart routing engine in the background.
     # The routing service exclusively owns all dashboard notifications:
     # it sends a targeted push to the user's previous counselor (if online)
     # or a broadcast to all counselors (if no preferred counselor / offline).
@@ -353,10 +370,32 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
             consensus["is_crisis"] = False
 
     if consensus.get("is_crisis") is True:
+        # Before routing, check if anyone is available to avoid sending false hope
+        from app.services.routing_service import get_available_counselor_count
+        count = await get_available_counselor_count()
+        if count == 0:
+            hotline_text = "No counselor is available at the moment. Please call the helpline at 911."
+            await save_message({
+                "session_id": actual_session_id,
+                "user_id": user_id,
+                "turn_number": turn_count + 2,
+                "role": "system",
+                "content": hotline_text,
+            })
+            hotline_payload = {
+                "done": True,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "text": hotline_text,
+            }
+            async def _hotline_stream():
+                yield f"data: {json.dumps(hotline_payload)}\n\n"
+            return StreamingResponse(
+                _hotline_stream(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
         # Routing service exclusively owns all dashboard notifications — do NOT
-        # broadcast here. It sends a targeted push to the preferred counselor
-        # (if online) or a broadcast to the full pool (fallback). A pre-emptive
-        # broadcast before routing fires would leak the session to every counselor.
         from app.services.routing_service import route_crisis_session
         asyncio.create_task(
             route_crisis_session(

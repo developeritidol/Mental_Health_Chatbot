@@ -333,6 +333,9 @@ async def close_escalation(session_id: str) -> bool:
     if db is None:
         return False
     try:
+        session_doc = await db.sessions.find_one({"session_id": session_id})
+        counselor_id = (session_doc or {}).get("assigned_counselor_id")
+
         await db.sessions.update_one(
             {"session_id": session_id},
             {"$set": {
@@ -342,6 +345,17 @@ async def close_escalation(session_id: str) -> bool:
                 "updated_at": datetime.now(timezone.utc),
             }},
         )
+
+        if counselor_id and counselor_id != "__routing__":
+            try:
+                await db.admins.update_one(
+                    {"_id": ObjectId(counselor_id), "current_active_sessions": {"$gt": 0}},
+                    {"$inc": {"current_active_sessions": -1}},
+                )
+                logger.info(f"[ESCALATION CLOSED] Freed slot for counselor {counselor_id}.")
+            except Exception as e:
+                logger.error(f"[ESCALATION CLOSED] Failed to free slot for {counselor_id}: {e}")
+
         logger.info(f"[ESCALATION CLOSED] Session {session_id} returned to AI mode.")
         return True
     except Exception as e:
@@ -357,6 +371,10 @@ async def close_escalation_by_user(user_id: str) -> bool:
     if db is None:
         return False
     try:
+        # Find all escalated sessions for this user to identify counselors
+        cursor = db.sessions.find({"user_id": user_id, "is_escalated": True})
+        sessions_to_close = await cursor.to_list(length=None)
+
         await db.sessions.update_many(
             {"user_id": user_id, "is_escalated": True},
             {"$set": {
@@ -366,6 +384,18 @@ async def close_escalation_by_user(user_id: str) -> bool:
                 "updated_at": datetime.now(timezone.utc),
             }},
         )
+
+        for session_doc in sessions_to_close:
+            counselor_id = session_doc.get("assigned_counselor_id")
+            if counselor_id and counselor_id != "__routing__":
+                try:
+                    await db.admins.update_one(
+                        {"_id": ObjectId(counselor_id), "current_active_sessions": {"$gt": 0}},
+                        {"$inc": {"current_active_sessions": -1}},
+                    )
+                except Exception:
+                    pass
+
         logger.info(f"[ESCALATION CLOSED] All sessions for user {user_id} returned to AI mode.")
         return True
     except Exception as e:

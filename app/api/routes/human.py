@@ -685,9 +685,22 @@ async def _counselor_timeout_watchdog(session_id: str, user_id: str):
             {"$set": {"assigned_counselor_id": None}},
         )
 
+        # Re-route the session
         from app.services.routing_service import route_crisis_session
         crisis_category = session_doc.get("crisis_category", "unknown")
         logger.info(f"[TIMEOUT] Re-routing session {session_id}, excluding {failed_counselor_id}.")
+        
+        # Free the reserved slot for the failed counselor (since they never joined)
+        if failed_counselor_id and failed_counselor_id != "__routing__":
+            try:
+                await db.admins.update_one(
+                    {"_id": ObjectId(failed_counselor_id), "current_active_sessions": {"$gt": 0}},
+                    {"$inc": {"current_active_sessions": -1}},
+                )
+                logger.info(f"[TIMEOUT] Released reserved slot for failed counselor {failed_counselor_id}.")
+            except Exception as e:
+                logger.error(f"[TIMEOUT] Failed to release slot for {failed_counselor_id}: {e}")
+
         reroute_consensus: dict = {"category": crisis_category, "is_crisis": True}
         if failed_counselor_id:
             reroute_consensus["_exclude_counselor_id"] = failed_counselor_id
@@ -1116,15 +1129,12 @@ async def human_chat_ws(websocket: WebSocket, session_id: str):
 
         if db is not None:
             try:
-                update_query: dict = {
-                    "$set": {"is_online": True, "last_ping": datetime.now(timezone.utc)}
-                }
-                if is_first_tab_in_room:
-                    update_query["$inc"] = {"current_active_sessions": 1}
-
+                # Presence update only. current_active_sessions is now incremented 
+                # atomically by the routing service upon assignment to prevent 
+                # duplicate pings during the "pending" phase.
                 await db.admins.update_one(
                     {"_id": ObjectId(authenticated_user_id)},
-                    update_query,
+                    {"$set": {"is_online": True, "last_ping": datetime.now(timezone.utc)}}
                 )
             except Exception as e:
                 logger.warning(f"[WS] Could not update presence for counselor {authenticated_user_id}: {e}")

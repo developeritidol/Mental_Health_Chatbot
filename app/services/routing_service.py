@@ -269,11 +269,12 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
                 # ── Tier 2: Context Match ────────────────────────────────────
                 if _categories_match(crisis_category, user_doc.get("last_crisis_category")):
                     # ── Tier 3: Availability Gate (Requirement 3.2) ───────────
+                    # Check if online AND not in an active chat
                     if _is_available(preferred_doc):
                         assigned_counselor = preferred_doc
-                        logger.info(f"[ROUTING] [ESCALATION] Previous counselor {preferred_id} is available and matched.")
+                        logger.info(f"[ROUTING] [ESCALATION] Previous counselor {preferred_id} is available and free. Assigning.")
                     else:
-                        logger.info(f"[ROUTING] [ESCALATION] Previous counselor {preferred_id} is NOT available (offline or busy).")
+                        logger.info(f"[ROUTING] [ESCALATION] Previous counselor {preferred_id} is offline or busy (in another chat). Falling back to FIFO.")
 
         # ── Fallback: Pool Search ─────────────────────────────────────────────
         if assigned_counselor is None:
@@ -317,26 +318,47 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
 
         counselor_id_str = str(assigned_counselor["_id"])
 
-        # ── Persist assignment — single atomic $set (Fix 8 enhancement) ──────
-        await db.sessions.update_one(
-            {"session_id": session_id},
-            {"$set": {
-                "assigned_counselor_id": counselor_id_str,
-                "crisis_category": crisis_category,
-                "assigned_at": datetime.now(timezone.utc),
-                "assignment_complete": True,
-                "routing_started_at": None,
-            }},
+        # ── Step 5: Finalize Assignment ───────────────────────────────────────
+        try:
+            # Atomic reservation: Increment session count immediately to prevent 
+            # race conditions where two routings pick the same counselor.
+            # (Requirement 2.3: Avoid duplicate notifications)
+            await db.admins.update_one(
+                {"_id": ObjectId(counselor_id_str)},
+                {"$inc": {"current_active_sessions": 1}}
+            )
+
+            # Update session with assigned counselor
+            await db.sessions.update_one(
+                {"session_id": session_id},
+                {
+                    "$set": {
+                        "assigned_counselor_id": counselor_id_str,
+                        "crisis_category": crisis_category,
+                        "assigned_at": datetime.now(timezone.utc),
+                        "assignment_complete": True,
+                        "routing_started_at": None,
+                    }
+                },
+            )
+            
+            # Persist assignment record (Sticky Routing Tier 1)
+            await _swap_assignment(user_id, counselor_id_str)
+            
+            logger.info(f"[ROUTING] Successfully reserved counselor {counselor_id_str} for session {session_id}")
+
+        except Exception as e:
+            logger.error(f"[ROUTING] Failed to finalize assignment for {session_id}: {e}")
+            return
+
+        # ── Step 6: Notify Counselor ──────────────────────────────────────────
+        # Notify through the "escalated conversation API" (targeted WebSocket)
+        await _notify_counselor(
+            counselor_id_str,
+            session_id,
+            crisis_category,
+            user_id,
         )
-
-        # ── Persist to doctor_user_assignments (transactional swap) ───────────
-        # If the selected counselor is different from the current active one,
-        # we must atomically deactivate the old record and insert a new one.
-        # If the same counselor is being reused, no changes to the table needed.
-        is_same_counselor = (str(preferred_id) == counselor_id_str) if preferred_id else False
-
-        if not is_same_counselor:
-            await _swap_assignment(db, user_id, counselor_id_str)
 
         # ── Determine Handoff Mode ────────────────────────────────────────────
         if active_assignment is None:

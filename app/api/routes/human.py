@@ -324,6 +324,8 @@ async def close_escalated_session(user_id: str, current_provider = Depends(get_c
     closing_session_id = session_doc.get("session_id")
     closing_crisis_category = session_doc.get("crisis_category", "unknown")
     closing_handoff_summary = session_doc.get("handoff_summary", "")
+    # Track which counselor was assigned so we can free their capacity slot below
+    closing_counselor_id = session_doc.get("assigned_counselor_id")
 
     try:
         await db.sessions.update_many(
@@ -342,6 +344,21 @@ async def close_escalated_session(user_id: str, current_provider = Depends(get_c
 
     if not success:
         raise HTTPException(status_code=500, detail="Failed to close escalation.")
+
+    # Bug fix: decrement the counselor's active session counter so they become
+    # available for the NEXT escalation.  The WebSocket disconnect path already
+    # does this, but a REST-close (counselor clicks "End session" on dashboard)
+    # only reaches this code path — without this decrement the counselor stays
+    # blocked at current_active_sessions > 0 and is excluded from future routing.
+    if closing_counselor_id and closing_counselor_id not in (None, "__routing__"):
+        try:
+            await db.admins.update_one(
+                {"_id": ObjectId(closing_counselor_id), "current_active_sessions": {"$gt": 0}},
+                {"$inc": {"current_active_sessions": -1}},
+            )
+            logger.info(f"[CLOSE] Freed capacity slot for counselor {closing_counselor_id}.")
+        except Exception as e:
+            logger.warning(f"[CLOSE] Could not free capacity for counselor {closing_counselor_id}: {e}")
 
     # Rooms are keyed by session_id (Issue 17 fix)
     room_key = closing_session_id or user_id
@@ -363,16 +380,11 @@ async def close_escalated_session(user_id: str, current_provider = Depends(get_c
         "is_system": True,
         "type": "session_closed",
     }
-    # Send before removing the room so active WebSocket connections receive the notice
-    for ws in list(manager.rooms.get(room_key, [])):
-        try:
-            await ws.send_text(json.dumps(close_notice))
-        except Exception:
-            pass
-
-    manager.rooms.pop(room_key, None)
-    manager.has_human.pop(room_key, None)
-    manager.room_counselors.pop(room_key, None)
+    # Bug fix: use send_to_all which sends the notice AND actively calls ws.close()
+    # on every socket.  The old manual loop only sent a text frame, leaving WebSocket
+    # connections dangling (ghost sockets).  On the next escalation, connect() would
+    # append to a room that still contained these dead sockets, breaking broadcasting.
+    await manager.send_to_all(room_key, close_notice)
 
     return {
         "status": "success",
@@ -1113,6 +1125,8 @@ async def human_chat_ws(websocket: WebSocket, session_id: str):
     await manager.connect(session_id, websocket)
     manager.register_ws_role(websocket, role)
     if role == "human_counselor":
+        manager.mark_human_joined(session_id)
+        manager.cancel_timeout_task(session_id)
         logger.info(
             f"[WS CHAT] ✓ CONNECTED | role=counselor | session={session_id}"
             f" | counselor_id={authenticated_user_id} | name={counselor_name}"

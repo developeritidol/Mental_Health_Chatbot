@@ -87,10 +87,16 @@ def _categories_match(current: str, previous: Optional[str]) -> bool:
     """Returns True if previous counselor's category is compatible with the current crisis.
     Uses a category hierarchy so related crises (e.g. suicidal_ideation + self_harm)
     are treated as compatible rather than requiring exact string equality.
+
+    'manual_escalation' and 'unknown' are always compatible with any previous category
+    so users who escalate manually or whose category is undetected always reconnect
+    with their trusted previous counselor if that counselor is available.
     """
     if previous is None:
         return True
     if current == previous:
+        return True
+    if current in ("manual_escalation", "unknown"):
         return True
     for group in _CATEGORY_GROUPS:
         if current in group and previous in group:
@@ -286,8 +292,7 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
                 {"$set": {"assigned_counselor_id": None, "routing_started_at": None}},
             )
             hotline_text = (
-                "We're sorry, no counselors are available right now. "
-                "If you are in immediate danger, please call the National Crisis Helpline: 911."
+                "No counselor is available at the moment. Please call the helpline at 911."
             )
             await db.messages.insert_one({
                 "session_id": session_id,

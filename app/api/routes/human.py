@@ -66,14 +66,27 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection failed.")
 
-    # Validate that the counselor is checked in before showing the escalation list
+    # Auto-checkin: If the counselor dashboard is polling, they are actively looking at the queue.
+    # We automatically mark them online and ensure they have a checked_in_at timestamp for FIFO.
     doctor_id = str(current_provider.get("user_id") or current_provider.get("_id"))
     counselor_doc = await db.admins.find_one({"_id": ObjectId(doctor_id)})
-    if not counselor_doc or not counselor_doc.get("is_online", False):
-        raise HTTPException(
-            status_code=403, 
-            detail="You must be checked in (online) to view the escalation list."
+    
+    _now = datetime.now(timezone.utc)
+    if not counselor_doc or not counselor_doc.get("is_online", False) or "checked_in_at" not in counselor_doc:
+        await db.admins.update_one(
+            {"_id": ObjectId(doctor_id)},
+            {"$set": {"is_online": True, "checked_in_at": _now, "last_ping": _now}}
         )
+        counselor_doc = await db.admins.find_one({"_id": ObjectId(doctor_id)})
+
+    # Update last_ping and ensure they are marked connected in memory,
+    # so counselors who rely solely on polling (REST API) bypass the WS connection checks.
+    from app.core.connection_registry import force_counselor_connected
+    force_counselor_connected(doctor_id)
+    await db.admins.update_one(
+        {"_id": ObjectId(doctor_id)},
+        {"$set": {"last_ping": _now}}
+    )
 
     # Availability flags for the requesting counselor used in the session filter below
     counselor_is_free = counselor_doc.get("current_active_sessions", 0) == 0
@@ -821,18 +834,30 @@ async def _notify_assigned_counselor_user_waiting(
                 f" | counselor={assigned_counselor_id}"
             )
         else:
-            # Targeted push failed (counselor's dashboard WS may have disconnected after
-            # receiving counselor_assigned — e.g. they navigated to the chat page).
-            # Avoid broadcast to prevent duplicate notifications per Issue 2.
+            # Targeted push failed — the counselor's dashboard WS is gone.
+            # Most likely cause: they clicked "Accept" and navigated to the chat
+            # URL, which closes the dashboard socket.  Give them 30 seconds to
+            # land in the chat room before treating this as a true no-show.
             logger.warning(
                 f"[NOTIFY] ⚠  user_waiting_in_room: targeted push failed for counselor "
-                f"{assigned_counselor_id} — triggering re-route to next available counselor."
+                f"{assigned_counselor_id} | session={session_id}. "
+                f"Waiting 30s to see if counselor connects via chat URL before re-routing."
             )
-            # Trigger automatic assignment to the next available counselor in queue
+            await asyncio.sleep(30)
+
+            if manager.is_role_in_room(session_id, "human_counselor"):
+                logger.info(
+                    f"[NOTIFY] ✓ Counselor joined chat room within 30s grace window | session={session_id}"
+                )
+                return
+
+            # Still no counselor in the room — trigger re-route
+            logger.warning(
+                f"[NOTIFY] Counselor {assigned_counselor_id} did not connect within 30s — re-routing."
+            )
             from app.services.routing_service import route_crisis_session
-            from app.core.database import get_database
             db = get_database()
-            if db:
+            if db is not None:
                 await db.sessions.update_one(
                     {"session_id": session_id},
                     {"$set": {"assigned_counselor_id": None}}
@@ -842,7 +867,6 @@ async def _notify_assigned_counselor_user_waiting(
                 "is_crisis": True,
                 "_exclude_counselor_id": assigned_counselor_id
             }
-            import asyncio
             asyncio.create_task(
                 route_crisis_session(user_id=user_id, session_id=session_id, consensus=reroute_consensus)
             )

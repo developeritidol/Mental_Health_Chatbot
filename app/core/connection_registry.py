@@ -30,3 +30,9 @@ def mark_counselor_disconnected(counselor_id: str) -> None:
 
 def is_counselor_connected(counselor_id: str) -> bool:
     return _connected.get(counselor_id, 0) > 0
+
+
+def force_counselor_connected(counselor_id: str) -> None:
+    """Ensures a counselor is marked as connected without infinitely incrementing the counter."""
+    if _connected.get(counselor_id, 0) == 0:
+        _connected[counselor_id] = 1

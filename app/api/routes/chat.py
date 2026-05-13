@@ -205,8 +205,10 @@ async def manual_escalate(
 
 # ── SSE Stream ─────────────────────────────────────────────────────────────────
 
+from fastapi import Request
+
 @router.post("/stream")
-async def stream_message(req: StreamChatRequest, current_user = Depends(get_current_user)):
+async def stream_message(req: StreamChatRequest, request: Request, current_user = Depends(get_current_user)):
     """
     Main chat endpoint.
     FC7: user_id is extracted from the JWT token, not the request body.
@@ -240,8 +242,8 @@ async def stream_message(req: StreamChatRequest, current_user = Depends(get_curr
             {"session_id": actual_session_id, "user_id": user_id}
         )
     if current_session and current_session.get("is_escalated"):
-        _settings = get_settings()
-        ws_url = f"ws://{_settings.SERVER_PUBLIC_HOST}:{_settings.SERVER_PORT}/api/human/chat/{actual_session_id}"
+        scheme = "wss" if request.url.scheme == "https" else "ws"
+        ws_url = f"{scheme}://{request.url.netloc}/api/human/chat/{actual_session_id}"
 
         logger.info(f"[GUARD] Session {actual_session_id} for user {user_id} is escalated. Redirecting.")
 

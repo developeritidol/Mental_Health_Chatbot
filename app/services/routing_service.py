@@ -53,18 +53,21 @@ def _is_fresh(counselor_doc: dict) -> bool:
 
 def _is_available(counselor_doc: dict) -> bool:
     """
-    Returns True only when ALL four gates pass:
+    Returns True when ALL three gates pass:
       1. is_online flag is True in DB
       2. Heartbeat is fresh (last_ping within _STALE_PING_SECONDS)
-      3. Active WebSocket connection exists on this process (connection_registry)
-      4. current_active_sessions == 0 (not currently in an active chat)
+      3. current_active_sessions == 0 (not currently in an active chat)
+
+    Note: We intentionally do NOT require an active in-memory WebSocket
+    connection (is_counselor_connected).  REST-only counselors (e.g. the
+    docker/counselor dashboard that polls GET /api/human/escalated) keep
+    their DB state fresh via the auto-checkin in that endpoint.  Requiring
+    an in-process WSocket would silently exclude them between poll intervals.
     """
-    counselor_id = str(counselor_doc.get("_id", ""))
     return (
         counselor_doc.get("is_online", False)
         and counselor_doc.get("is_active", True)
         and _is_fresh(counselor_doc)
-        and is_counselor_connected(counselor_id)
         and counselor_doc.get("current_active_sessions", 0) == 0
     )
 
@@ -132,11 +135,9 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
             name = f"{c.get('first_name', '')} {c.get('last_name', '')}".strip() or cid
             checked_in = c.get("checked_in_at", "N/A")
             active_sessions = c.get("current_active_sessions", 0)
-            ws_ok = is_counselor_connected(cid)
             logger.info(
                 f"[ROUTING] [FIFO]   [{idx}] {name} (id={cid})"
                 f" | checked_in_at={checked_in} | active_sessions={active_sessions}"
-                f" | ws_connected={ws_ok}"
             )
     else:
         logger.warning("[ROUTING] [FIFO] No candidates found in queue (no free, checked-in counselors).")
@@ -148,7 +149,7 @@ async def _find_available_counselor(exclude_id: Optional[str] = None) -> Optiona
             logger.info(f"[ROUTING] [FIFO] ✓ Selected FIFO[0] available: {name} (id={cid})")
             return candidate
 
-    logger.warning("[ROUTING] [FIFO] No candidate passed availability gate (WS check or active_sessions).")
+    logger.warning("[ROUTING] [FIFO] No candidate passed availability gate (is_online / last_ping / active_sessions).")
     return None
 
 
@@ -504,12 +505,15 @@ async def _notify_counselor(
                 f"[ROUTING] [NOTIFY] ✓ Targeted push delivered to counselor {counselor_id}."
             )
         else:
-            # Targeted push failed — counselor_ws not populated yet.
-            # Avoid broadcast to prevent duplicate notifications per Issue 2.
-            logger.warning(
-                f"[ROUTING] [NOTIFY] ⚠  Counselor {counselor_id} not in counselor_ws — "
-                f"targeted push failed. Not broadcasting to prevent duplicates (session={session_id})."
+            # Targeted push failed — counselor uses REST polling, not a dashboard WS.
+            # Broadcast to all connected dashboard clients so any WS-based monitor
+            # sees the assignment.  The assigned counselor will discover the session
+            # on their next GET /api/human/escalated poll (typically within 60s).
+            logger.info(
+                f"[ROUTING] [NOTIFY] Counselor {counselor_id} has no dashboard WS — "
+                f"broadcasting to all dashboards and relying on REST poll for session {session_id}."
             )
+            await ws_manager.broadcast_to_dashboard(assigned_payload)
 
     except Exception as e:
         logger.warning(f"[ROUTING] Dashboard notification failed for counselor {counselor_id}: {e}")

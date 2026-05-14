@@ -540,6 +540,15 @@ class ConnectionManager:
         # session_id → set of counselor_ids already counted in current_active_sessions
         # Prevents double-counting when a counselor opens multiple tabs for the same patient
         self.room_counselors: dict[str, set[str]] = {}
+        # Sessions that have been permanently closed — reconnect attempts are silently
+        # dropped (no message sent) to prevent the "session ended" loop on the client.
+        self._ended_sessions: set[str] = set()
+
+    def mark_session_ended(self, session_id: str) -> None:
+        self._ended_sessions.add(session_id)
+
+    def is_session_ended(self, session_id: str) -> bool:
+        return session_id in self._ended_sessions
 
     def start_timeout_task(self, user_id: str, task: asyncio.Task):
         self.timeout_tasks[user_id] = task
@@ -635,16 +644,21 @@ class ConnectionManager:
             self.disconnect(user_id, ws)
 
     async def send_to_all(self, user_id: str, payload: dict):
-        """Send a message and close all connections in a room.
+        """Send a terminal message and close all connections in a room.
+        Uses close code 4001 so clients can distinguish a permanent session-end
+        from a transient network drop and stop auto-reconnecting.
         Does NOT cancel timeout tasks — callers that want cleanup must do so explicitly.
         """
+        # Mark the session as permanently ended before sending so that any
+        # reconnect attempt that races with our close() is also suppressed.
+        self.mark_session_ended(user_id)
         message = json.dumps(payload)
         ws_list = self.rooms.get(user_id, []).copy()
         for ws in ws_list:
             self.unregister_ws_role(ws)
             try:
                 await ws.send_text(message)
-                await ws.close()
+                await ws.close(code=4001)
             except Exception:
                 pass
         # Clean up room state directly without triggering timeout cancellation
@@ -1189,7 +1203,13 @@ async def human_chat_ws(websocket: WebSocket, session_id: str):
             logger.warning(
                 f"[WS CHAT] ✗ REJECTED | session={session_id} | role=user | reason=no active escalation"
             )
-            # Accept first so the client receives a readable message before disconnect
+            # If we already sent the ended notice for this session (client is reconnect-looping),
+            # close silently without sending the message again so the UI doesn't spam the user.
+            if manager.is_session_ended(session_id):
+                await websocket.close(code=4001)
+                return
+            # First time: accept, send the ended notice once, mark session ended, then close.
+            manager.mark_session_ended(session_id)
             await websocket.accept()
             await websocket.send_json({
                 "type": "session_ended",
@@ -1198,7 +1218,7 @@ async def human_chat_ws(websocket: WebSocket, session_id: str):
                 "is_system": True,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
-            await websocket.close(code=4003)
+            await websocket.close(code=4001)
             return
 
     # 6. Counselor path: validate this counselor is assigned to this session

@@ -478,8 +478,12 @@ async def _notify_counselor(
     user_id: str,
 ) -> None:
     """
-    Sends a targeted push to the assigned counselor's dashboard WebSocket only.
-    No broadcast fallback — FIFO assignment means only one counselor should ever be notified.
+    Sends a targeted push to the assigned counselor's dashboard WebSocket.
+
+    If the counselor has no active dashboard WS (REST-polling mode), the
+    notification is persisted to their admin document as `pending_notification`.
+    It is then delivered the moment they open their dashboard WS or call
+    GET /api/human/escalated, whichever comes first.
     """
     logger.info(
         f"[ROUTING] [NOTIFY] Counselor {counselor_id} paged for "
@@ -494,7 +498,6 @@ async def _notify_counselor(
             f"/api/human/chat/{session_id}"
         )
 
-        # 1 — Targeted: only the assigned counselor
         assigned_payload = {
             "type": "counselor_assigned",
             "counselor_id": counselor_id,
@@ -504,21 +507,39 @@ async def _notify_counselor(
             "websocket_url": ws_url,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+
         delivered = await ws_manager.notify_counselor(counselor_id, assigned_payload)
         if delivered:
             logger.info(
                 f"[ROUTING] [NOTIFY] ✓ Targeted push delivered to counselor {counselor_id}."
             )
-        else:
-            # Targeted push failed — counselor uses REST polling, not a dashboard WS.
-            # Broadcast to all connected dashboard clients so any WS-based monitor
-            # sees the assignment.  The assigned counselor will discover the session
-            # on their next GET /api/human/escalated poll (typically within 60s).
-            logger.info(
-                f"[ROUTING] [NOTIFY] Counselor {counselor_id} has no dashboard WS — "
-                f"broadcasting to all dashboards and relying on REST poll for session {session_id}."
-            )
-            await ws_manager.broadcast_to_dashboard(assigned_payload)
+            return
+
+        # Targeted push failed — counselor has no open dashboard WS right now.
+        # Persist the notification to MongoDB so it is delivered immediately when
+        # the counselor next opens the dashboard WS or calls GET /api/human/escalated.
+        logger.info(
+            f"[ROUTING] [NOTIFY] Counselor {counselor_id} has no dashboard WS — "
+            f"persisting pending_notification to DB for deferred delivery (session={session_id})."
+        )
+        db = get_database()
+        if db is not None:
+            try:
+                await db.admins.update_one(
+                    {"_id": ObjectId(counselor_id)},
+                    {"$set": {"pending_notification": assigned_payload}},
+                )
+                logger.info(
+                    f"[ROUTING] [NOTIFY] pending_notification saved for counselor {counselor_id}."
+                )
+            except Exception as db_err:
+                logger.warning(
+                    f"[ROUTING] [NOTIFY] Could not save pending_notification for counselor {counselor_id}: {db_err}"
+                )
+
+        # Also broadcast to any other open dashboard WS clients (monitors, other tabs)
+        # so the assignment is visible on any active screen.
+        await ws_manager.broadcast_to_dashboard(assigned_payload)
 
     except Exception as e:
         logger.warning(f"[ROUTING] Dashboard notification failed for counselor {counselor_id}: {e}")

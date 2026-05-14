@@ -83,9 +83,44 @@ async def list_escalated_sessions(user_id: Optional[str] = None, current_provide
     # so counselors who rely solely on polling (REST API) bypass the WS connection checks.
     from app.core.connection_registry import force_counselor_connected
     force_counselor_connected(doctor_id)
+    update_fields: dict = {"last_ping": _now}
+
+    # If a pending_notification was queued while this counselor was offline, deliver it
+    # now via their counselor_ws (if they have one) and clear it from the DB.
+    # For pure REST-polling counselors the session will appear in Case B of the visibility
+    # filter below; we still clear the pending flag so it doesn't linger.
+    pending_notif = (counselor_doc or {}).get("pending_notification")
+    if pending_notif:
+        notif_session_id = pending_notif.get("session_id")
+        should_deliver = True
+        if notif_session_id:
+            try:
+                notif_session_doc = await db.sessions.find_one({"session_id": notif_session_id})
+                if notif_session_doc and not notif_session_doc.get("is_escalated", False):
+                    should_deliver = False  # session already closed — discard stale notif
+            except Exception:
+                pass
+        if should_deliver:
+            # Push to counselor's active dashboard WS (may have just opened one)
+            delivered = await manager.notify_counselor(doctor_id, pending_notif)
+            if delivered:
+                logger.info(
+                    f"[NOTIFY] ✓ Deferred pending_notification delivered via WS to counselor {doctor_id}"
+                    f" on REST poll | session={notif_session_id}"
+                )
+            else:
+                logger.info(
+                    f"[NOTIFY] pending_notification for counselor {doctor_id} will surface via"
+                    f" session list (Case B) | session={notif_session_id}"
+                )
+        update_fields["pending_notification"] = None  # use $unset below
+
     await db.admins.update_one(
         {"_id": ObjectId(doctor_id)},
-        {"$set": {"last_ping": _now}}
+        {
+            "$set": {k: v for k, v in update_fields.items() if k != "pending_notification"},
+            **( {"$unset": {"pending_notification": ""}} if pending_notif else {} ),
+        }
     )
 
     # Availability flags for the requesting counselor used in the session filter below
@@ -978,6 +1013,7 @@ async def dashboard_notifications_ws(websocket: WebSocket):
     if counselor_id and db is not None:
         mark_counselor_connected(counselor_id)
         counselor_display = counselor_id  # fallback; overwrite if DB lookup succeeds
+        pending_notification = None
         try:
             _now = datetime.now(timezone.utc)
             # Always refresh is_online and last_ping on connect
@@ -990,14 +1026,15 @@ async def dashboard_notifications_ws(websocket: WebSocket):
                 {"_id": ObjectId(counselor_id), "checked_in_at": {"$exists": False}},
                 {"$set": {"checked_in_at": _now}},
             )
-            # Fetch name for log readability
+            # Fetch name + any pending notification queued while counselor was offline
             admin_doc = await db.admins.find_one(
-                {"_id": ObjectId(counselor_id)}, {"first_name": 1, "last_name": 1}
+                {"_id": ObjectId(counselor_id)}, {"first_name": 1, "last_name": 1, "pending_notification": 1}
             )
             if admin_doc:
                 fn = admin_doc.get("first_name", "")
                 ln = admin_doc.get("last_name", "")
                 counselor_display = f"{fn} {ln}".strip() or counselor_id
+                pending_notification = admin_doc.get("pending_notification")
             logger.info(
                 f"[WS DASHBOARD] ✓ CONNECTED | counselor_id={counselor_id}"
                 f" | name={counselor_display} | ip={dashboard_ip} | status=online (available for routing)"
@@ -1005,6 +1042,32 @@ async def dashboard_notifications_ws(websocket: WebSocket):
         except Exception as e:
             logger.warning(f"[WS DASHBOARD] Could not set online status for {counselor_id}: {e}")
         heartbeat_task = asyncio.create_task(_counselor_heartbeat(counselor_id))
+
+        # Deliver any notification that was queued while the counselor was offline
+        if pending_notification:
+            try:
+                # Verify the session is still open before delivering the stale notification
+                notif_session_id = pending_notification.get("session_id")
+                still_pending = True
+                if notif_session_id and db is not None:
+                    notif_session = await db.sessions.find_one({"session_id": notif_session_id})
+                    if notif_session and not notif_session.get("is_escalated", False):
+                        still_pending = False  # session already closed
+                if still_pending:
+                    await websocket.send_json(pending_notification)
+                    logger.info(
+                        f"[WS DASHBOARD] ✓ Delivered pending_notification to counselor {counselor_id}"
+                        f" | session={pending_notification.get('session_id')}"
+                    )
+                # Clear the pending notification regardless (delivered or stale)
+                await db.admins.update_one(
+                    {"_id": ObjectId(counselor_id)},
+                    {"$unset": {"pending_notification": ""}},
+                )
+            except Exception as notif_err:
+                logger.warning(
+                    f"[WS DASHBOARD] Could not deliver pending_notification for counselor {counselor_id}: {notif_err}"
+                )
     else:
         logger.info(f"[WS DASHBOARD] ✓ CONNECTED | role=anonymous monitor | ip={dashboard_ip}")
 

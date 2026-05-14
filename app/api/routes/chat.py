@@ -345,7 +345,7 @@ async def stream_message(req: StreamChatRequest, request: Request, current_user 
             "done": True,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": "counselor_request",
-            "message": "Of course — you can connect with a human counselor anytime using the button in the top right corner.",
+            "message": "Of course — you can connect with a human counselor anytime using the button in the top right corner 👤.",
             "button_icon_url": f"{_base_url}/static/images/connect_counselor_btn.png",
         }
 

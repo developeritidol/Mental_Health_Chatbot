@@ -74,17 +74,15 @@ class Settings(BaseSettings):
     # ── CORS ─────────────────────────────────────────────────────────────────
     # Comma-separated list of allowed origins. Leave empty to allow all (dev only).
     ALLOWED_ORIGINS: str = ""
+    # ALLOWED_ORIGINS: str = "http://192.168.29.22:5173"
+    ALLOWED_ORIGINS: str = "http://192.168.3.117:5173"
 
     # ── JWT Authentication ────────────────────────────────────────────────────
     SECRET_KEY: str = Field(
         ...,
         validation_alias=AliasChoices("JWT_SECRET_KEY", "SECRET_KEY"),
-        description="Set via JWT_SECRET_KEY or SECRET_KEY environment variable"
+        description="Set via JWT_SECRET_KEY or SECRET_KEY environment variable.",
     )
-        #     ..., 
-        #     min_length=32, 
-        #     description="Must be set via SECRET_KEY environment variable"
-        # )    
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 10080  # 7 days
     REFRESH_TOKEN_EXPIRE_DAYS: int = 15

@@ -253,6 +253,7 @@ async def stream_message(req: StreamChatRequest, request: Request, current_user 
             "type": "escalation_active",
             "handoff_message": "You are currently connected to a human counselor. Please continue in the live chat.",
             "websocket_url": ws_url,
+            "is_crisis": False,
         }
 
         async def _redirect_stream():
@@ -332,6 +333,8 @@ async def stream_message(req: StreamChatRequest, request: Request, current_user 
         logger.info(f"[CRISIS_GUARD] Suppressed false-positive crisis — anti-crisis phrase detected: '{req.message[:80]}'")
         consensus["is_crisis"] = False
 
+    is_message_crisis = bool(consensus.get("is_crisis", False))
+
     # ── Counselor request detection — user explicitly asked for a human ───────
     if consensus.get("wants_counselor") is True and any(p in _msg_lower for p in _AI_PREFERENCE_PHRASES):
         logger.info(f"[COUNSELOR_REQUEST] Suppressed — user message indicates AI preference: '{req.message[:80]}'")
@@ -347,6 +350,7 @@ async def stream_message(req: StreamChatRequest, request: Request, current_user 
             "type": "counselor_request",
             "message": "Of course — you can connect with a human counselor anytime using the button in the top right corner 👤.",
             "button_icon_url": f"{_base_url}/static/images/connect_counselor_btn.png",
+            "is_crisis": is_message_crisis,
         }
 
         async def _counselor_request_stream():
@@ -388,6 +392,7 @@ async def stream_message(req: StreamChatRequest, request: Request, current_user 
                 "done": True,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "text": hotline_text,
+                "is_crisis": True,
             }
             async def _hotline_stream():
                 yield f"data: {json.dumps(hotline_payload)}\n\n"
@@ -422,6 +427,7 @@ async def stream_message(req: StreamChatRequest, request: Request, current_user 
                 "intensity": consensus.get("intensity", "high"),
                 "is_crisis_signal": True,
             },
+            "is_crisis": True,
         }
 
         async def _crisis_stream():
@@ -445,7 +451,7 @@ async def stream_message(req: StreamChatRequest, request: Request, current_user 
                 long_term_memory=long_term_memory,
             ):
                 full_reply.append(chunk)
-                yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+                yield f"data: {json.dumps({'chunk': chunk, 'is_crisis': is_message_crisis})}\n\n"
 
             emotion_dict = {
                 "dominant_emotion":  emotion_result.dominant if emotion_result else "neutral",
@@ -457,6 +463,7 @@ async def stream_message(req: StreamChatRequest, request: Request, current_user 
                 "done": True,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "emotion": emotion_dict,
+                "is_crisis": is_message_crisis,
             }
             yield f"data: {json.dumps(done_payload)}\n\n"
 

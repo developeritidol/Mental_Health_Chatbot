@@ -560,11 +560,11 @@ async def _counsel_reconnect_grace(
 
         await manager.send_to_all(session_id, {
             "role": "system",
-            "text": "Your counselor has disconnected. You will be connected back to AI support.",
+            "text": "The counselor has ended this session. You will be connected back to AI support.",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "is_human": False,
             "is_system": True,
-            "type": "counselor_disconnected",
+            "type": "session_closed",
         })
 
         asyncio.create_task(

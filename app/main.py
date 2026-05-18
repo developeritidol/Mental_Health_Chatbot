@@ -18,6 +18,7 @@ from app.api.routes import assessment, audio, chat, user
 from app.api.routes.human import router as human_router
 from app.core.config import get_settings
 from app.core.database import close_mongo_connection, connect_to_mongo, get_database
+from app.core.redis import redis_manager
 from app.core.logger import get_logger
 from app.services.emotion import warmup
 import os
@@ -43,8 +44,9 @@ async def lifespan(app: FastAPI):
     """
     logger.info("MindBuddy starting up...")
 
-    # 1. Database
+    # 1. Database & Cache
     await connect_to_mongo()
+    await redis_manager.connect()
 
     # 2. Emotion model warm-up (CPU-bound — offloaded to thread pool)
     loop = asyncio.get_event_loop()
@@ -76,6 +78,7 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("MindBuddy shutting down.")
+    await redis_manager.disconnect()
     await close_mongo_connection()
 
 

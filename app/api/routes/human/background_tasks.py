@@ -14,6 +14,7 @@ Contains all long-running async background functions used by the human handoff s
 """
 
 import asyncio
+import random
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import WebSocket
@@ -32,8 +33,8 @@ logger = get_logger(__name__)
 # ── Timing constants ──────────────────────────────────────────────────────────
 
 COUNSELOR_JOIN_TIMEOUT_SECONDS = 1200  # 20 min: max wait for counselor to join after user connects
-USER_INACTIVITY_TIMEOUT_SECONDS = 600   # 10 min: max user silence before auto-close
-GLOBAL_INACTIVITY_TIMEOUT_MINUTES = 35  # 35 min: max session inactivity before watchdog closes it
+USER_INACTIVITY_TIMEOUT_SECONDS = 1800  # 30 minutes: max user silence before auto-close
+GLOBAL_INACTIVITY_TIMEOUT_MINUTES = 60  # 60 min: max session inactivity before watchdog closes it
 HEARTBEAT_INTERVAL_SECONDS = 20         # How often to refresh counselor last_ping in DB
 RECONNECT_GRACE_PERIOD_SECONDS = 120    # 2 min window for counselor to reconnect after a drop
 
@@ -55,7 +56,7 @@ async def _counselor_timeout_watchdog(session_id: str, user_id: str) -> None:
     finally:
         manager.remove_timeout_task(session_id)
 
-    if manager.human_has_joined(session_id):
+    if await manager.human_has_joined(session_id):
         return  # Counselor arrived before timeout — nothing to do
 
     logger.warning(
@@ -141,7 +142,9 @@ async def inactivity_watchdog() -> None:
 
     while True:
         try:
-            await asyncio.sleep(60)
+            # LOW-3: Random jitter prevents all server instances waking at the same
+            # second and hammering MongoDB simultaneously (thundering herd).
+            await asyncio.sleep(60 + random.uniform(0, 10))
             expired_sessions = await get_expired_escalated_sessions(
                 timeout_minutes=GLOBAL_INACTIVITY_TIMEOUT_MINUTES
             )
@@ -269,51 +272,10 @@ async def _notify_assigned_counselor_user_waiting(
             logger.warning(
                 f"[NOTIFY] Patient-waiting push failed — counselor dashboard WS not found"
                 f" | session={session_id} | counselor_id={assigned_counselor_id}"
-                f" | waiting 30s for counselor to connect via chat URL"
             )
-            await asyncio.sleep(30)
-
-            if manager.is_role_in_room(session_id, "human_counselor"):
-                logger.info(
-                    f"[NOTIFY] Counselor joined chat room within 30s grace window | session={session_id}"
-                )
-                return
-
-            db = get_database()
-            if db is not None:
-                fresh_doc = await db.sessions.find_one({"session_id": session_id})
-                if (fresh_doc or {}).get("assignment_complete"):
-                    logger.info(
-                        f"[NOTIFY] assignment_complete=True in DB — counselor connected | session={session_id}"
-                    )
-                    return
-                if not (fresh_doc or {}).get("is_escalated", True):
-                    logger.info(
-                        f"[NOTIFY] Session no longer escalated — skipping re-route | session={session_id}"
-                    )
-                    return
-
-            logger.warning(
-                f"[NOTIFY] Counselor did not connect within 30s — triggering re-route"
-                f" | session={session_id} | excluded_counselor={assigned_counselor_id}"
-            )
-            from app.services.routing_service import route_crisis_session
-            db = get_database()
-            if db is not None:
-                await db.sessions.update_one(
-                    {"session_id": session_id},
-                    {"$set": {"assigned_counselor_id": None}},
-                )
-            reroute_consensus = {
-                "category": session_doc.get("crisis_category", "unknown") if session_doc else "unknown",
-                "is_crisis": True,
-                "_exclude_counselor_id": assigned_counselor_id,
-            }
-            asyncio.create_task(
-                route_crisis_session(
-                    user_id=user_id, session_id=session_id, consensus=reroute_consensus
-                )
-            )
+        
+        # Delivery attempt finished. The global _counselor_timeout_watchdog (running for 20 mins)
+        # will handle re-routing if the counselor never joins.
     else:
         logger.info(
             f"[NOTIFY] Skipping patient-waiting push — no counselor assigned yet | session={session_id}"
@@ -409,7 +371,7 @@ async def _user_inactivity_watchdog(
                 timeout=USER_INACTIVITY_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
-            if not manager.is_role_in_room(session_id, "human_counselor"):
+            if not await manager.is_role_in_room(session_id, "human_counselor"):
                 return  # No counselor present — let counselor-timeout watchdog handle recovery
 
             logger.warning(
@@ -517,22 +479,28 @@ async def _counsel_reconnect_grace(
     """
     await asyncio.sleep(RECONNECT_GRACE_PERIOD_SECONDS)
 
-    if manager.is_role_in_room(session_id, "human_counselor"):
+    if await manager.is_role_in_room(session_id, "human_counselor"):
         logger.info(
             f"[GRACE] RECONNECTED within grace period — escalation preserved"
             f" | session={session_id} | counselor_id={counselor_id}"
         )
         return
+    db = get_database()
+    if db is None:
+        return
 
+    counselor_doc = await db.admins.find_one({"_id": ObjectId(counselor_id)})
+    if counselor_doc and counselor_doc.get("is_online", False):
+        logger.info(
+            f"[GRACE] Counselor is still online (likely managing another tab) — escalation preserved"
+            f" | session={session_id} | counselor_id={counselor_id}"
+        )
+        return
     logger.warning(
         f"[GRACE] EXPIRED — counselor did not reconnect; closing escalation"
         f" | session={session_id} | counselor_id={counselor_id}"
         f" | grace_window={RECONNECT_GRACE_PERIOD_SECONDS}s"
     )
-
-    db = get_database()
-    if db is None:
-        return
 
     try:
         session_doc = await db.sessions.find_one({"session_id": session_id})

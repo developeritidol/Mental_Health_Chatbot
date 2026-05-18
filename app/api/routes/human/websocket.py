@@ -31,6 +31,14 @@ from app.core.auth.jwt_handler import verify_token
 from app.core.connection_registry import mark_counselor_connected, mark_counselor_disconnected
 from app.core.database import get_database
 from app.core.logger import get_logger
+from app.models.events import (
+    OutgoingMessageEvent,
+    SystemNoticeEvent,
+    SessionEndedEvent,
+    SystemHandoffBriefEvent,
+    UserDisconnectedEvent,
+    SessionClaimedEvent,
+)
 from app.services.db_service import save_message
 
 from .background_tasks import (
@@ -117,13 +125,14 @@ async def dashboard_notifications_ws(websocket: WebSocket) -> None:
 
             admin_doc = await db.admins.find_one(
                 {"_id": ObjectId(counselor_id)},
-                {"first_name": 1, "last_name": 1, "pending_notification": 1},
+                {"first_name": 1, "last_name": 1, "pending_notifications": 1},
             )
             if admin_doc:
                 fn = admin_doc.get("first_name", "")
                 ln = admin_doc.get("last_name", "")
                 counselor_display_name = f"{fn} {ln}".strip() or counselor_id
-                pending_notification = admin_doc.get("pending_notification")
+                # Fix: Use plural array for guaranteed delivery
+                pending_notifications = admin_doc.get("pending_notifications", [])
 
             logger.info(
                 f"[WS DASHBOARD] CONNECTED"
@@ -138,33 +147,29 @@ async def dashboard_notifications_ws(websocket: WebSocket) -> None:
 
         heartbeat_task = asyncio.create_task(_counselor_heartbeat(counselor_id))
 
-        # Deliver any notification queued while counselor was offline
-        if pending_notification:
-            try:
-                notif_session_id = pending_notification.get("session_id")
-                should_deliver = True
-                if notif_session_id and db is not None:
-                    notif_session = await db.sessions.find_one({"session_id": notif_session_id})
-                    if notif_session and not notif_session.get("is_escalated", False):
-                        should_deliver = False  # Session already closed — discard stale notification
-
-                if should_deliver:
-                    await websocket.send_json(pending_notification)
-                    logger.info(
-                        f"[WS DASHBOARD] NOTIF DELIVERED (offline-queued)"
-                        f" | counselor={counselor_display_name} (id={counselor_id})"
-                        f" | session={notif_session_id}"
-                    )
-
-                await db.admins.update_one(
-                    {"_id": ObjectId(counselor_id)},
-                    {"$unset": {"pending_notification": ""}},
-                )
-            except Exception as exc:
-                logger.warning(
-                    f"[WS DASHBOARD] Could not deliver pending notification"
-                    f" | counselor_id={counselor_id} | error={exc}"
-                )
+        # Deliver any notifications queued while counselor was offline
+        if pending_notifications:
+            delivered_any = False
+            for notif in pending_notifications:
+                try:
+                    notif_session_id = notif.get("session_id")
+                    should_deliver = True
+                    if notif_session_id and db is not None:
+                        notif_session = await db.sessions.find_one({"session_id": notif_session_id})
+                        if notif_session and not notif_session.get("is_escalated", False):
+                            should_deliver = False
+                    
+                    if should_deliver:
+                        await websocket.send_json(notif)
+                        delivered_any = True
+                except Exception:
+                    pass
+            
+            # Note: We NO LONGER clear the queue here. Notifications persist in the DB 
+            # until the counselor actually JOINS the chat room. This prevents 
+            # notifications from 'disappearing' if the counselor refreshes.
+            if delivered_any:
+                logger.info(f"[WS DASHBOARD] Delivered {len(pending_notifications)} pending notification(s) to {counselor_id}")
     else:
         logger.info(
             f"[WS DASHBOARD] CONNECTED | role=anonymous_monitor | ip={client_ip}"
@@ -195,8 +200,8 @@ async def dashboard_notifications_ws(websocket: WebSocket) -> None:
         manager.disconnect_dashboard(websocket, counselor_id=counselor_id)
         try:
             await websocket.close(code=1011)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[WS DASHBOARD] Failed to cleanly close socket | error={e}")
 
     finally:
         if heartbeat_task is not None:
@@ -317,13 +322,8 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
                 return
             manager.mark_session_ended(session_id)
             await websocket.accept()
-            await websocket.send_json({
-                "type": "session_ended",
-                "role": "system",
-                "text": "This session has already ended. You will be returned to AI support.",
-                "is_system": True,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+            event = SessionEndedEvent(text="This session has already ended. You will be returned to AI support.")
+            await websocket.send_json(event.model_dump())
             await websocket.close(code=4001)
             logger.warning(
                 f"[WS CHAT] REJECTED | session={session_id} | role=user"
@@ -350,7 +350,7 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
 
     # ── 7. Accept and register the connection ─────────────────────────────────
     await manager.connect(session_id, websocket)
-    manager.register_ws_role(websocket, role)
+    await manager.register_ws_role(websocket, session_id, role)
 
     # Resolve display names for structured logging
     user_display_name = user_id
@@ -382,7 +382,7 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
             f" | active_connections={len(manager.rooms.get(session_id, []))}"
         )
     else:
-        manager.mark_user_joined(session_id)
+        await manager.mark_user_joined(session_id)
         logger.info(
             f"[WS CHAT] CONNECTED | role=user"
             f" | session={session_id}"
@@ -391,7 +391,8 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
         )
 
     # ── 8. User: start watchdogs and notify counselor ─────────────────────────
-    user_activity_event: Optional[asyncio.Event] = None
+    # Global activity event shared between all connections in this room
+    user_activity_event = manager.get_activity_event(session_id)
     user_inactivity_task: Optional[asyncio.Task] = None
 
     if role == "user":
@@ -405,11 +406,11 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
                 f" | session={session_id} | timeout={COUNSELOR_JOIN_TIMEOUT_SECONDS}s"
             )
 
-        asyncio.create_task(
+        notify_task = asyncio.create_task(
             _notify_assigned_counselor_user_waiting(session_id, user_id, session_doc)
         )
+        manager.start_notify_task(session_id, notify_task)
 
-        user_activity_event = asyncio.Event()
         user_inactivity_task = asyncio.create_task(
             _user_inactivity_watchdog(session_id, user_id, user_activity_event)
         )
@@ -419,9 +420,9 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
     # ── 9. Counselor: update presence and send handoff brief ──────────────────
     if role == "human_counselor":
         mark_counselor_connected(authenticated_user_id)
-        is_first_tab_for_session = manager.add_counselor_to_room(
-            session_id, authenticated_user_id
-        )
+        active_counselor_tabs = await manager.get_role_count(session_id, "human_counselor")
+        has_joined_before = await manager.human_has_joined(session_id)
+        should_send_join_notice = not has_joined_before
 
         if db is not None:
             # Update counselor presence in DB
@@ -429,8 +430,9 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
                 presence_update: dict = {
                     "$set": {"is_online": True, "last_ping": datetime.now(timezone.utc)}
                 }
-                if is_first_tab_for_session:
-                    presence_update["$inc"] = {"current_active_sessions": 1}
+                # NOTE: current_active_sessions is now incremented atomically in
+                # routing_service.py at assignment time (single $inc with $lt guard).
+                # Do NOT increment here — that would double-count the capacity slot.
 
                 await db.admins.update_one(
                     {"_id": ObjectId(authenticated_user_id)},
@@ -446,7 +448,10 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
             try:
                 await db.sessions.update_one(
                     {"session_id": session_id},
-                    {"$set": {"assigned_counselor_id": authenticated_user_id}},
+                    {"$set": {
+                        "assigned_counselor_id": authenticated_user_id,
+                        "assignment_complete": True,
+                    }},
                 )
                 logger.info(
                     f"[WS CHAT] Counselor assignment confirmed in DB"
@@ -470,14 +475,22 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
                         f"[WS CHAT] accepted_at stamped on assignment"
                         f" | user_id={user_id}"
                     )
+                
+                # Clear this specific notification from the counselor's queue now that they have joined
+                await db.admins.update_one(
+                    {"_id": ObjectId(authenticated_user_id)},
+                    {"$pull": {"pending_notifications": {"session_id": session_id}}}
+                )
+                logger.info(f"[WS CHAT] Cleared notification for session {session_id} from counselor queue.")
             except Exception as exc:
                 logger.warning(
-                    f"[WS CHAT] Could not stamp accepted_at | user_id={user_id} | error={exc}"
+                    f"[WS CHAT] Could not update assignment/notification status | user_id={user_id} | error={exc}"
                 )
 
         heartbeat_task = asyncio.create_task(_counselor_heartbeat(authenticated_user_id))
-        manager.mark_human_joined(session_id)
+        await manager.mark_human_joined(session_id)
         manager.cancel_timeout_task(session_id)
+        manager.cancel_notify_task(session_id)
 
         # Log the clear user↔counselor mapping now that both sides are identified
         logger.info(
@@ -490,30 +503,32 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
         )
 
         # Notify all dashboards that this session has been claimed
-        asyncio.create_task(manager.broadcast_to_dashboard({
-            "type": "session_claimed",
-            "session_id": session_id,
-            "counselor_id": authenticated_user_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }))
+        claim_event = SessionClaimedEvent(
+            session_id=session_id,
+            counselor_id=authenticated_user_id
+        )
+        asyncio.create_task(manager.broadcast_to_dashboard(claim_event.model_dump()))
 
         # Send handoff brief immediately; start background task for the real GPT-4o summary
         if db is not None and session_doc is not None:
             handoff_summary = session_doc.get("handoff_summary")
-            await websocket.send_json({
-                "type": "system_handoff_brief",
-                "content": handoff_summary or "Clinical summary is being generated — you will receive it shortly.",
-                "crisis_category": session_doc.get("crisis_category", "unknown"),
-                "summary_ready": bool(handoff_summary),
-            })
-
-            if handoff_summary:
+            handoff_event = SystemHandoffBriefEvent(
+                content=handoff_summary or "Clinical summary is being generated — you will receive it shortly.",
+                crisis_category=session_doc.get("crisis_category", "unknown"),
+                summary_ready=bool(handoff_summary),
+            )
+            # --- Delivered Handoff Brief (Multi-tab Safe) ---
+            try:
+                await websocket.send_json(handoff_event.model_dump())
                 logger.info(
                     f"[WS CHAT] Handoff brief delivered immediately"
-                    f" | session={session_id}"
-                    f" | counselor={counselor_display_name} (id={authenticated_user_id})"
+                    f" | session={session_id} | counselor={counselor_display_name} (id={authenticated_user_id})"
                 )
-            else:
+            except Exception:
+                # Socket might have closed during serialization or sending
+                logger.warning(f"[WS CHAT] Failed to deliver initial handoff brief (counselor disconnected) | session={session_id}")
+
+            if not handoff_summary:
                 logger.info(
                     f"[WS CHAT] Placeholder handoff sent; background delivery task started"
                     f" | session={session_id}"
@@ -521,17 +536,40 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
                 asyncio.create_task(_deliver_handoff_when_ready(websocket, session_id, db))
 
         # Broadcast join notice to the patient
-        join_notice = {
-            "role": "human_counselor",
-            "counselor_name": counselor_display_name,
-            "text": f"{counselor_display_name} has joined the chat. You're not alone.",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "is_human": True,
-            "is_system": True,
-        }
-        await manager.broadcast(session_id, join_notice, websocket)
+        # Fix: Ensure this only happens once per session to avoid duplicate notices
+        # if the counselor opens multiple tabs.
+        if should_send_join_notice:
+            join_event = SystemNoticeEvent(
+                role="human_counselor",
+                counselor_name=counselor_display_name,
+                text=f"{counselor_display_name} has joined the chat. You're not alone.",
+                is_human=True,
+                is_system=True,
+            )
+            await manager.broadcast(session_id, join_event.model_dump(), websocket)
+            logger.info(f"[WS CHAT] First counselor join notice broadcast | session={session_id}")
 
     # ── 10. Message loop ───────────────────────────────────────────────────────
+    # MEDIUM-7: Server-initiated ping every 30s to keep counselor WebSocket alive.
+    # Only for human_counselor (web browser). Android user app sends its own pings.
+    async def _keepalive_ping():
+        if role != "human_counselor":
+            return
+        try:
+            while True:
+                await asyncio.sleep(30)
+                try:
+                    await asyncio.wait_for(
+                        websocket.send_text(json.dumps({"type": "ping"})),
+                        timeout=5.0,
+                    )
+                except Exception:
+                    break
+        except asyncio.CancelledError:
+            pass
+
+    keepalive_task: Optional[asyncio.Task] = asyncio.create_task(_keepalive_ping())
+
     try:
         while True:
             raw = await websocket.receive_text()
@@ -550,16 +588,14 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
 
             if data.get("type") == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
-                if user_activity_event is not None:
-                    user_activity_event.set()
+                manager.mark_activity(session_id)
                 continue
 
             message_text = data.get("text", "").strip()
             if not message_text:
                 continue
 
-            if user_activity_event is not None:
-                user_activity_event.set()
+            manager.mark_activity(session_id)
 
             is_counselor_message = role == "human_counselor"
             sender_label = "counselor" if is_counselor_message else "user"
@@ -575,15 +611,13 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
                 f' | preview="{preview}"'
             )
 
-            outbound_payload = {
-                "type": "message",
-                "role": role,
-                "counselor_name": counselor_display_name if is_counselor_message else None,
-                "text": message_text,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "is_human": is_counselor_message,
-                "done": True,
-            }
+            outbound_event = OutgoingMessageEvent(
+                role=role,
+                counselor_name=counselor_display_name if is_counselor_message else None,
+                text=message_text,
+                is_human=is_counselor_message,
+                done=True,
+            )
 
             await save_message({
                 "session_id": session_id,
@@ -593,10 +627,10 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
                 "is_human_message": is_counselor_message,
             })
 
-            await manager.broadcast(session_id, outbound_payload, sender_ws=None)
+            await manager.broadcast(session_id, outbound_event.model_dump(), sender_ws=websocket)
 
     except WebSocketDisconnect:
-        manager.disconnect(session_id, websocket)
+        await manager.disconnect(session_id, websocket)
 
         if role == "human_counselor":
             logger.warning(
@@ -613,15 +647,9 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
                 f" | session={session_id}"
                 f" | user={user_display_name} (id={authenticated_user_id})"
             )
-            if manager.is_role_in_room(session_id, "human_counselor"):
-                await manager.broadcast(session_id, {
-                    "role": "system",
-                    "text": "The user has disconnected from the session.",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "is_human": False,
-                    "is_system": True,
-                    "type": "user_disconnected",
-                }, websocket)
+            if await manager.is_role_in_room(session_id, "human_counselor"):
+                disconnect_event = UserDisconnectedEvent()
+                await manager.broadcast(session_id, disconnect_event.model_dump(), websocket)
 
     except Exception as exc:
         logger.error(
@@ -632,22 +660,26 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
         manager.disconnect(session_id, websocket)
         try:
             await websocket.close(code=1011)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[WS CHAT] Failed to cleanly close socket | session={session_id} | error={e}")
 
     finally:
         if heartbeat_task is not None:
             heartbeat_task.cancel()
         if user_inactivity_task is not None:
             user_inactivity_task.cancel()
+        if keepalive_task is not None:
+            keepalive_task.cancel()  # MEDIUM-7: always cancel the keepalive ping
 
         if role == "human_counselor":
             mark_counselor_disconnected(authenticated_user_id)
-            was_counted_in_room = manager.is_counselor_in_room(session_id, authenticated_user_id)
-            manager.remove_counselor_from_room(session_id, authenticated_user_id)
+            # Reference counted role removal (multi-tab safe)
+            await manager.unregister_ws_role(websocket, session_id)
+            still_in_room = await manager.is_role_in_room(session_id, "human_counselor")
 
             if db is not None:
-                if was_counted_in_room:
+                if not still_in_room:
+                    # Last connection closed — release the capacity slot claimed at routing time
                     try:
                         await db.admins.update_one(
                             {

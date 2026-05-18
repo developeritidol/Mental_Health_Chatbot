@@ -1,5 +1,5 @@
 """
-MindBridge — FastAPI Application Entry Point
+MindBuddy — FastAPI Application Entry Point
 ──────────────────────────────────────────────
 Initialises the application, registers middleware, mounts routers,
 and manages the lifespan (startup/shutdown) of shared resources.
@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI):
       3. Reset all counselor online flags (in-memory registry is lost on restart).
       4. Start the global 35-minute session inactivity watchdog.
     """
-    logger.info("MindBridge starting up...")
+    logger.info("MindBuddy starting up...")
 
     # 1. Database
     await connect_to_mongo()
@@ -72,10 +72,10 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.error(f"Failed to start inactivity watchdog: {exc}")
 
-    logger.info("MindBridge ready.")
+    logger.info("MindBuddy ready.")
     yield
 
-    logger.info("MindBridge shutting down.")
+    logger.info("MindBuddy shutting down.")
     await close_mongo_connection()
 
 

@@ -53,7 +53,7 @@ def _build_recent_history_string(history: list[dict], n_turns: int = 4) -> str:
     recent = history[-(n_turns * 2):]
     lines = []
     for msg in recent:
-        role = "User" if msg.get("role") == "user" else "MindBridge"
+        role = "User" if msg.get("role") == "user" else "MindBuddy"
         content = msg.get("content", "").strip()
         if content:
             lines.append(f"{role}: {content}")

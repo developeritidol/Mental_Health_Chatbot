@@ -77,6 +77,24 @@ async def _counselor_timeout_watchdog(session_id: str, user_id: str) -> None:
             {"$set": {"assigned_counselor_id": None}},
         )
 
+        if failed_counselor_id and failed_counselor_id != "__routing__":
+            try:
+                await db.admins.update_one(
+                    {
+                        "_id": ObjectId(failed_counselor_id),
+                        "current_active_sessions": {"$gt": 0},
+                    },
+                    {"$inc": {"current_active_sessions": -1}},
+                )
+                logger.info(
+                    f"[TIMEOUT] Freed counselor capacity slot for unresponsive counselor"
+                    f" | counselor_id={failed_counselor_id}"
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"[TIMEOUT] Failed to free capacity | counselor_id={failed_counselor_id} | error={exc}"
+                )
+
         from app.services.routing_service import route_crisis_session
 
         crisis_category = session_doc.get("crisis_category", "unknown")
@@ -525,6 +543,23 @@ async def _counsel_reconnect_grace(
                 "updated_at": datetime.now(timezone.utc),
             }},
         )
+
+        try:
+            await db.admins.update_one(
+                {
+                    "_id": ObjectId(counselor_id),
+                    "current_active_sessions": {"$gt": 0},
+                },
+                {"$inc": {"current_active_sessions": -1}},
+            )
+            logger.info(
+                f"[GRACE] Freed counselor capacity slot"
+                f" | counselor_id={counselor_id}"
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[GRACE] Failed to free capacity | counselor_id={counselor_id} | error={exc}"
+            )
 
         await manager.send_to_all(session_id, {
             "role": "system",

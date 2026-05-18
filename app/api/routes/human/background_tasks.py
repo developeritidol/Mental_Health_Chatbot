@@ -106,9 +106,7 @@ async def _counselor_timeout_watchdog(session_id: str, user_id: str) -> None:
             f"[TIMEOUT] Re-routing session | session={session_id}"
             f" | excluded_counselor={failed_counselor_id}"
         )
-        asyncio.create_task(
-            route_crisis_session(user_id=user_id, session_id=session_id, consensus=reroute_consensus)
-        )
+        await route_crisis_session(user_id=user_id, session_id=session_id, consensus=reroute_consensus, pre_acquired_lock=False)
         return
 
     # No valid session to re-route — notify user and return to AI

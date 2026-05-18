@@ -213,10 +213,10 @@ async def get_available_counselor_count() -> int:
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -> None:
+async def route_crisis_session(user_id: str, session_id: str, consensus: dict, pre_acquired_lock: bool = False) -> None:
     """
-    Main routing orchestrator. Always called via asyncio.create_task() so it
-    never blocks the SSE stream.
+    Main routing orchestrator. Can be run synchronously to prevent race conditions
+    in HTTP handlers, or asynchronously in background tasks.
 
     Uses the doctor_user_assignments collection for Tier 1 sticky routing and
     persists new assignments via MongoDB transactions to prevent data
@@ -247,19 +247,20 @@ async def route_crisis_session(user_id: str, session_id: str, consensus: dict) -
             {"$set": {"assigned_counselor_id": None, "routing_started_at": None}},
         )
 
-        # Acquire routing lock. Query excludes "__routing__" to prevent duplicate
-        # concurrent routing tasks, but allows any other value (null or a stale
-        # counselor ID from a prior closed session) so re-escalations are not blocked.
-        claim_result = await db.sessions.find_one_and_update(
-            {"session_id": session_id, "assigned_counselor_id": {"$ne": "__routing__"}},
-            {"$set": {
-                "assigned_counselor_id": "__routing__",
-                "routing_started_at": datetime.now(timezone.utc),
-            }},
-        )
-        if claim_result is None:
-            logger.info(f"[ROUTING] Session {session_id} already being routed — skipping duplicate task.")
-            return
+        if not pre_acquired_lock:
+            # Acquire routing lock. Query excludes "__routing__" to prevent duplicate
+            # concurrent routing tasks, but allows any other value (null or a stale
+            # counselor ID from a prior closed session) so re-escalations are not blocked.
+            claim_result = await db.sessions.find_one_and_update(
+                {"session_id": session_id, "assigned_counselor_id": {"$ne": "__routing__"}},
+                {"$set": {
+                    "assigned_counselor_id": "__routing__",
+                    "routing_started_at": datetime.now(timezone.utc),
+                }},
+            )
+            if claim_result is None:
+                logger.info(f"[ROUTING] Session {session_id} already being routed — skipping duplicate task.")
+                return
 
         assigned_counselor: Optional[dict] = None
         preferred_id: Optional[str] = None

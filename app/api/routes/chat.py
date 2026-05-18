@@ -238,19 +238,10 @@ async def stream_message(req: StreamChatRequest, request: Request, current_user 
     if consensus.get("is_crisis") is True:
         logger.warning(f"[ESCALATION] Crisis detected for user {user_id} in session {actual_session_id}.")
 
-        escalated_ok = await escalate_session(actual_session_id)
-        if not escalated_ok:
-            logger.error(
-                f"[ESCALATION] escalate_session() failed for session {actual_session_id} — "
-                "routing aborted; falling back to normal AI response."
-            )
-            # Clear the crisis flag so execution continues to the normal AI stream below
-            consensus["is_crisis"] = False
-
-    if consensus.get("is_crisis") is True:
         # Before routing, check if anyone is available to avoid sending false hope
         from app.services.routing_service import get_available_counselor_count
         count = await get_available_counselor_count()
+        
         if count == 0:
             hotline_text = "No counselor is available at the moment. Please call the helpline at 911."
             await save_message({
@@ -274,42 +265,51 @@ async def stream_message(req: StreamChatRequest, request: Request, current_user 
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
-        # Routing service exclusively owns all dashboard notifications — do NOT
-        from app.services.routing_service import route_crisis_session
-        asyncio.create_task(
-            route_crisis_session(
-                user_id=user_id,
-                session_id=actual_session_id,
-                consensus=consensus,
+        # We have available counselors — proceed with DB escalation
+        escalated_ok = await escalate_session(actual_session_id)
+        if not escalated_ok:
+            logger.error(
+                f"[ESCALATION] escalate_session() failed for session {actual_session_id} — "
+                "routing aborted; falling back to normal AI response."
             )
-        )
+            consensus["is_crisis"] = False
+        else:
+            # Routing service exclusively owns all dashboard notifications
+            from app.services.routing_service import route_crisis_session
+            asyncio.create_task(
+                route_crisis_session(
+                    user_id=user_id,
+                    session_id=actual_session_id,
+                    consensus=consensus,
+                )
+            )
 
-        # Return a single done-event — no AI chunks, no dual response
-        _settings = get_settings()
-        _ws_url = f"ws://{_settings.SERVER_PUBLIC_HOST}:{_settings.SERVER_PORT}/api/human/chat/{actual_session_id}"
-        crisis_payload = {
-            "done": True,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "type": "crisis_escalation",
-            "handoff_message": "Connecting you to our specialized support team. Please stay on this screen.",
-            "websocket_url": _ws_url,
-            "emotion": {
-                "dominant_emotion": emotion_result.dominant if emotion_result else "neutral",
-                "response_mode": consensus.get("category", "general"),
-                "intensity": consensus.get("intensity", "high"),
-                "is_crisis_signal": True,
-            },
-            "is_crisis": True,
-        }
+            # Return a single done-event — no AI chunks, no dual response
+            _settings = get_settings()
+            _ws_url = f"ws://{_settings.SERVER_PUBLIC_HOST}:{_settings.SERVER_PORT}/api/human/chat/{actual_session_id}"
+            crisis_payload = {
+                "done": True,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "type": "crisis_escalation",
+                "handoff_message": "Connecting you to our specialized support team. Please stay on this screen.",
+                "websocket_url": _ws_url,
+                "emotion": {
+                    "dominant_emotion": emotion_result.dominant if emotion_result else "neutral",
+                    "response_mode": consensus.get("category", "general"),
+                    "intensity": consensus.get("intensity", "high"),
+                    "is_crisis_signal": True,
+                },
+                "is_crisis": True,
+            }
 
-        async def _crisis_stream():
-            yield f"data: {json.dumps(crisis_payload)}\n\n"
+            async def _crisis_stream():
+                yield f"data: {json.dumps(crisis_payload)}\n\n"
 
-        return StreamingResponse(
-            _crisis_stream(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+            return StreamingResponse(
+                _crisis_stream(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
 
     # ── Normal AI stream ───────────────────────────────────────────────────────
     async def generate():

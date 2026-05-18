@@ -3,7 +3,9 @@ import certifi
 from motor.motor_asyncio import AsyncIOMotorClient
 from app.core.config import get_settings
 
-logger = logging.getLogger(__name__)
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
 settings = get_settings()
 
 class DatabaseManager:

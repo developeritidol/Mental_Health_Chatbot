@@ -75,12 +75,9 @@ async def _is_available(counselor_doc: dict) -> bool:
         return False
 
     # Gate 5: real-time WebSocket presence via Redis
-    # We check Redis for a live WebSocket, but if they aren't in Redis
-    # we STILL trust the DB flags if they are fresh. This ensures REST-polling
-    # counselors (fallback mode) are still counted as available.
     redis = get_redis()
+    counselor_id = str(counselor_doc.get("_id", ""))
     if redis:
-        counselor_id = str(counselor_doc.get("_id", ""))
         try:
             is_ws_online = await redis.sismember("dashboard:online_counselors", counselor_id)
             if is_ws_online:
@@ -90,14 +87,21 @@ async def _is_available(counselor_doc: dict) -> bool:
             from app.core.connection_registry import is_counselor_connected
             if is_counselor_connected(counselor_id):
                 return True
+            
             # If we successfully queried Redis and memory and both said False, they are offline!
             return False
         except Exception:
-            # If Redis crashed during the query, fallback to DB
+            # If Redis crashed during the query, fallback to local registry check
             pass
 
-    # Fallback: trust DB flags (already verified in db_pass above)
-    return True
+    # Fallback if Redis is unavailable or crashed:
+    # Check if they are connected to this instance's memory registry.
+    # This prevents blindly trusting stale DB heartbeat flags for offline counselors.
+    from app.core.connection_registry import is_counselor_connected
+    if is_counselor_connected(counselor_id):
+        return True
+        
+    return False
 
 
 

@@ -90,7 +90,10 @@ async def _is_available(counselor_doc: dict) -> bool:
             from app.core.connection_registry import is_counselor_connected
             if is_counselor_connected(counselor_id):
                 return True
+            # If we successfully queried Redis and memory and both said False, they are offline!
+            return False
         except Exception:
+            # If Redis crashed during the query, fallback to DB
             pass
 
     # Fallback: trust DB flags (already verified in db_pass above)
@@ -636,24 +639,16 @@ async def _notify_counselor(
             "websocket_url": ws_url,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-
-        # --- Step 1: Persist to DB notification queue (P-1: queue prevents overwrite) ---
-        # Using $push instead of $set so multiple assignments while the counselor is
-        # offline are ALL queued and delivered on reconnect — never overwritten.
-        db = get_database()
-        if db is not None:
-            await db.admins.update_one(
-                {"_id": ObjectId(counselor_id)},
-                {"$push": {"pending_notifications": assigned_payload}}
-            )
-            logger.info(f"[ROUTING] [NOTIFY] ✓ Notification queued in DB for {counselor_id}.")
+        # Removed Step 1 (DB pending_notifications queue)
+        # Notifications should only be sent in real-time when the counselor is active.
 
         # --- Step 2: Attempt real-time WebSocket push ---
         await ws_manager.notify_counselor(counselor_id, assigned_payload)
         logger.info(f"[ROUTING] [NOTIFY] Real-time push dispatched for {counselor_id}.")
 
-        # --- Step 3: Global Broadcast (for dashboard monitors/other instances) ---
-        await ws_manager.broadcast_to_dashboard(assigned_payload)
+        # Global Broadcast of targeted assignments causes other counselors
+        # (even those at max capacity) to incorrectly receive the notification.
+        # Removed broadcast_to_dashboard here.
 
     except Exception as e:
         logger.error(f"[ROUTING] [NOTIFY] Guaranteed delivery failed for counselor {counselor_id}: {e}")

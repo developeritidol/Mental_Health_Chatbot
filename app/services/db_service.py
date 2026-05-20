@@ -617,8 +617,7 @@ async def get_user_messages(user_id: str, limit: int = 500) -> List[Dict]:
 
         formatted = []
         for doc in docs:
-            if doc.get("role") == "system" or doc.get("sender_type") == "system":
-                continue
+            # Include system role/sender_type messages so notices are visible in chat history
             if doc.get("content"):
                 formatted.append({
                     "user_id": doc.get("user_id", "unknown"),

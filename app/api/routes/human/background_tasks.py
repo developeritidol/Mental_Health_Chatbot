@@ -422,6 +422,12 @@ async def _user_inactivity_watchdog(
                     except Exception:
                         pass
 
+            await save_message({
+                "session_id": session_id,
+                "user_id": user_id,
+                "role": "system",
+                "content": "Session closed due to user inactivity.",
+            })
             await manager.send_to_all(session_id, {
                 "role": "system",
                 "text": "Session closed due to user inactivity.",
@@ -559,9 +565,16 @@ async def _counsel_reconnect_grace(
                 f"[GRACE] Failed to free capacity | counselor_id={counselor_id} | error={exc}"
             )
 
+        close_text = "The counselor has ended this session. You will be connected back to AI support."
+        await save_message({
+            "session_id": session_id,
+            "user_id": user_id,
+            "role": "system",
+            "content": close_text,
+        })
         await manager.send_to_all(session_id, {
             "role": "system",
-            "text": "The counselor has ended this session. You will be connected back to AI support.",
+            "text": close_text,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "is_human": False,
             "is_system": True,

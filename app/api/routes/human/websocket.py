@@ -548,6 +548,15 @@ async def human_chat_ws(websocket: WebSocket, session_id: str) -> None:
             )
             await manager.broadcast(session_id, join_event.model_dump(), websocket)
             logger.info(f"[WS CHAT] First counselor join notice broadcast | session={session_id}")
+            
+            # Save the join notice to the database so it appears in history when the page loads
+            await save_message({
+                "session_id": session_id,
+                "user_id": user_id,
+                "role": "system",
+                "content": join_event.text,
+                "is_human_message": False,
+            })
 
     # ── 10. Message loop ───────────────────────────────────────────────────────
     # MEDIUM-7: Server-initiated ping every 30s to keep counselor WebSocket alive.

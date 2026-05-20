@@ -32,7 +32,7 @@ from app.core.auth.oauth2 import get_current_user
 from app.core.connection_registry import is_counselor_connected, mark_counselor_connected, mark_counselor_disconnected
 from app.core.database import get_database
 from app.core.logger import get_logger
-from app.services.db_service import _ensure_utc, get_user_messages
+from app.services.db_service import _ensure_utc, get_user_messages, save_message
 
 from .background_tasks import _generate_and_save_post_session_summaries
 from .connection_manager import manager
@@ -390,6 +390,13 @@ async def close_escalated_session(
         "is_system": True,
         "type": "session_closed",
     }
+    # Save the close notice message to database so it appears in history
+    await save_message({
+        "session_id": closing_session_id or room_key,
+        "user_id": user_id,
+        "role": "system",
+        "content": close_notice["text"],
+    })
     await manager.send_to_all(room_key, close_notice)
 
     return {
